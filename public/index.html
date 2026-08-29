@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f172a" />
+  <link rel="manifest" href="/manifest.json" />
+  <title>Claude Remote</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+  <style>
+    html, body { height: 100%; overscroll-behavior: none; }
+    #terminal { height: 100%; }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 flex flex-col h-screen">
+  <!-- Panel de control -->
+  <header class="bg-slate-800 px-3 py-2 shadow-lg shrink-0">
+    <div class="flex items-center justify-between text-xs mb-1">
+      <span class="font-semibold">Uso de tokens</span>
+      <span id="reset-timer" class="font-mono text-amber-400">--:--:--</span>
+    </div>
+    <div class="w-full bg-slate-700 rounded-full h-2.5 overflow-hidden">
+      <div id="usage-bar" class="bg-emerald-500 h-2.5 rounded-full transition-all duration-500" style="width:0%"></div>
+    </div>
+    <div class="flex items-center justify-between mt-1 text-[11px] text-slate-400">
+      <span id="usage-label">0%</span>
+      <span id="conn-status" class="text-red-400">&#9679; desconectado</span>
+    </div>
+  </header>
+
+  <!-- Terminal -->
+  <main id="terminal" class="flex-1 min-h-0 px-1 py-1"></main>
+
+  <!-- Botones rápidos -->
+  <footer id="quickbar" class="bg-slate-800 px-2 py-2 flex gap-2 shrink-0 overflow-x-auto">
+    <button data-cmd="/compact">/compact</button>
+    <button data-cmd="/clear">/clear</button>
+    <button data-cmd="/cost">/cost</button>
+    <button data-key="esc">Esc</button>
+    <button data-key="tab">Tab</button>
+    <button data-key="ctrlc">Ctrl+C</button>
+  </footer>
+
+  <script>
+    // Estilo compartido de los botones de la barra rápida.
+    document.querySelectorAll("#quickbar button").forEach((b) =>
+      b.classList.add("bg-slate-700", "active:bg-emerald-600", "text-slate-100",
+        "text-sm", "font-mono", "px-3", "py-2", "rounded-lg", "whitespace-nowrap"));
+  </script>
+  <script src="/app.js"></script>
+</body>
+</html>

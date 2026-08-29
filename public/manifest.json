@@ -1,0 +1,18 @@
+{
+  "name": "Claude Remote",
+  "short_name": "Claude",
+  "description": "Control remoto de Claude CLI desde Android",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
