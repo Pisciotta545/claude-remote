@@ -19,8 +19,11 @@
   <!-- Panel de control -->
   <header class="bg-slate-800 px-3 py-2 shadow-lg shrink-0">
     <div class="flex items-center justify-between text-xs mb-1">
-      <span class="font-semibold">Uso de tokens</span>
-      <span id="reset-timer" class="font-mono text-amber-400">--:--:--</span>
+      <div class="flex items-center gap-2 min-w-0">
+        <button id="backBtn" class="hidden bg-slate-700 active:bg-emerald-600 rounded px-2 py-0.5 text-[11px]">‹ Proyectos</button>
+        <span id="proj-name" class="font-semibold truncate">Uso de tokens</span>
+      </div>
+      <span id="reset-timer" class="font-mono text-amber-400 shrink-0">--:--:--</span>
     </div>
     <div class="w-full bg-slate-700 rounded-full h-2.5 overflow-hidden">
       <div id="usage-bar" class="bg-emerald-500 h-2.5 rounded-full transition-all duration-500" style="width:0%"></div>
@@ -31,11 +34,18 @@
     </div>
   </header>
 
+  <!-- Selector de proyectos -->
+  <section id="picker" class="flex-1 min-h-0 overflow-y-auto p-3">
+    <h1 class="text-lg font-semibold mb-1">Elegí un proyecto</h1>
+    <p id="picker-hint" class="text-xs text-slate-400 mb-3">Cargando…</p>
+    <div id="proj-list" class="grid grid-cols-1 gap-2"></div>
+  </section>
+
   <!-- Terminal -->
-  <main id="terminal" class="flex-1 min-h-0 px-1 py-1"></main>
+  <main id="terminal" class="flex-1 min-h-0 px-1 py-1 hidden"></main>
 
   <!-- Botones rápidos -->
-  <footer id="quickbar" class="bg-slate-800 px-2 py-2 flex gap-2 shrink-0 overflow-x-auto">
+  <footer id="quickbar" class="hidden bg-slate-800 px-2 py-2 gap-2 shrink-0 overflow-x-auto flex">
     <button data-cmd="/compact">/compact</button>
     <button data-cmd="/clear">/clear</button>
     <button data-cmd="/cost">/cost</button>

@@ -14,15 +14,27 @@ PWA + backend Node.js para controlar Claude CLI desde Android (red local / Tails
 ### Estructura
 
 ```
-server.js            Express + WebSocket (/ws) + PTY + GET /api/usage
+server.js            Express + WS (/ws) + PTY + APIs usage/projects/app-version + /download/app.apk
 package.json         Dependencias: express, node-pty, ws
-public/index.html    UI móvil (Tailwind CDN)
-public/app.js        xterm.js, WebSocket, métricas, botones rápidos
+app-version.json     versionCode/versionName del APK servido (autoupdate)
+claude-remote.apk    APK que sirve el autoactualizador (ignorado por git)
+public/index.html    UI móvil + selector de proyectos (Tailwind CDN)
+public/app.js        xterm.js, WebSocket, selector de proyectos, métricas, botones rápidos
 public/manifest.json manifest PWA
 public/sw.js         service worker (instalación PWA)
 public/icon.svg      ícono
-android/             APK nativo (WebView) que envuelve la PWA
+android/             APK nativo (WebView) con selector de proyectos y autoupdater
 ```
+
+### Endpoints
+
+| Ruta | Función |
+|------|---------|
+| `GET /api/usage` | Uso de tokens (lee credenciales, consulta API OAuth) |
+| `GET /api/projects` | Lista subcarpetas de `PROJECTS_DIRS` (def.: carpeta del repo) |
+| `GET /api/app-version` | Versión del APK (lee `app-version.json`) |
+| `GET /download/app.apk` | Sirve `APK_PATH` para el autoupdate |
+| WS `/ws` | `{type:"start",cwd}` inicia Claude en la carpeta, luego `input`/`resize` |
 
 ### App Android (`android/`)
 
@@ -30,12 +42,15 @@ APK mínimo sin dependencias externas (solo APIs de plataforma). Es un **cliente
 
 | Archivo | Función |
 |---------|---------|
-| `app/src/main/java/com/claude/remote/MainActivity.java` | Pantalla de config (guarda `IP:puerto`), `WebView`, menú "Cambiar servidor" |
+| `app/src/main/java/com/claude/remote/MainActivity.java` | Config `IP:puerto`, `WebView`, menú (Cambiar servidor / Buscar actualización) y autoupdater |
 | `app/src/main/res/layout/config.xml` | Formulario de dirección del servidor |
-| `app/src/main/AndroidManifest.xml` | Permisos (`INTERNET`), `usesCleartextTraffic` para http/ws en red local |
-| `build.gradle`, `app/build.gradle` | AGP 8.5.2 · compileSdk 35 · minSdk 24 · Java 17 |
+| `app/src/main/res/xml/file_paths.xml` | Rutas del `FileProvider` (para instalar el APK descargado) |
+| `app/src/main/AndroidManifest.xml` | Permisos (`INTERNET`, `REQUEST_INSTALL_PACKAGES`), `usesCleartextTraffic`, `FileProvider` |
+| `build.gradle`, `app/build.gradle` | AGP 8.5.2 · compileSdk 35 · minSdk 24 · Java 17 · dep `androidx.core` |
 
 Requiere SDK de Android (`ANDROID_HOME`) + JDK 17. El APK debug queda firmado con la clave de debug (instalable directo).
+
+**Publicar versión nueva:** subir `versionCode`/`versionName` en `app/build.gradle` **y** en `app-version.json`, recompilar y copiar el APK a `claude-remote.apk`.
 
 ### Comandos
 

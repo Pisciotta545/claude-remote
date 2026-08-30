@@ -8,12 +8,79 @@ const term = new Terminal({
 const fit = new FitAddon.FitAddon();
 term.loadAddon(fit);
 term.open(document.getElementById("terminal"));
-fit.fit();
+
+// --- Elementos -------------------------------------------------------------
+const status = document.getElementById("conn-status");
+const picker = document.getElementById("picker");
+const terminalEl = document.getElementById("terminal");
+const quickbar = document.getElementById("quickbar");
+const backBtn = document.getElementById("backBtn");
+const projName = document.getElementById("proj-name");
+const projList = document.getElementById("proj-list");
+const pickerHint = document.getElementById("picker-hint");
+
+let ws;
+let currentProject = null; // { name, path }
+
+// --- Vistas ----------------------------------------------------------------
+function showPicker() {
+  currentProject = null;
+  if (ws) {
+    ws.onclose = null; // evita la reconexión automática al cerrar a propósito
+    ws.close();
+    ws = null;
+  }
+  term.reset();
+  picker.classList.remove("hidden");
+  terminalEl.classList.add("hidden");
+  quickbar.classList.add("hidden");
+  backBtn.classList.add("hidden");
+  projName.textContent = "Uso de tokens";
+  loadProjects();
+}
+
+function openProject(proj) {
+  currentProject = proj;
+  picker.classList.add("hidden");
+  terminalEl.classList.remove("hidden");
+  quickbar.classList.remove("hidden");
+  backBtn.classList.remove("hidden");
+  projName.textContent = proj.name;
+  fit.fit();
+  connect();
+  term.focus();
+}
+
+backBtn.addEventListener("click", showPicker);
+
+// --- Lista de proyectos ----------------------------------------------------
+async function loadProjects() {
+  pickerHint.textContent = "Cargando…";
+  projList.innerHTML = "";
+  try {
+    const res = await fetch("/api/projects");
+    const data = await res.json();
+    const projects = data.projects || [];
+    if (!projects.length) {
+      pickerHint.textContent = "No se encontraron proyectos.";
+      return;
+    }
+    pickerHint.textContent = `${projects.length} proyectos`;
+    for (const p of projects) {
+      const btn = document.createElement("button");
+      btn.textContent = p.name;
+      btn.title = p.path;
+      btn.className =
+        "text-left bg-slate-800 active:bg-emerald-600 rounded-lg px-4 py-3 text-sm truncate";
+      btn.addEventListener("click", () => openProject(p));
+      projList.appendChild(btn);
+    }
+  } catch {
+    pickerHint.textContent = "Error al cargar proyectos. ¿El servidor está corriendo?";
+  }
+}
 
 // --- WebSocket -------------------------------------------------------------
-const status = document.getElementById("conn-status");
-let ws;
-
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -21,12 +88,13 @@ function connect() {
   ws.onopen = () => {
     status.textContent = "● conectado";
     status.className = "text-emerald-400";
+    if (currentProject) send({ type: "start", cwd: currentProject.path });
     sendResize();
   };
   ws.onclose = () => {
     status.textContent = "● desconectado";
     status.className = "text-red-400";
-    setTimeout(connect, 2000); // reconexión automática
+    if (currentProject) setTimeout(() => currentProject && connect(), 2000);
   };
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
@@ -47,6 +115,7 @@ term.onData((data) => send({ type: "input", data }));
 
 // --- Ajuste responsivo -----------------------------------------------------
 const onResize = () => {
+  if (terminalEl.classList.contains("hidden")) return;
   fit.fit();
   sendResize();
 };
@@ -102,7 +171,8 @@ if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").catch(() => {});
 }
 
-connect();
+// --- Inicio ----------------------------------------------------------------
+showPicker();
 fetchUsage();
 setInterval(fetchUsage, 30000); // refresca métricas cada 30 s
 setInterval(paintTimer, 1000); // cuenta regresiva cada 1 s
