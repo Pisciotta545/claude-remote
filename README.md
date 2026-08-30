@@ -23,6 +23,18 @@ npm run dev      # recarga automática
 
 Servidor por defecto en `http://0.0.0.0:3000`.
 
+### Autoarranque oculto con Windows
+
+Dos archivos trabajan juntos: `start-hidden.vbs` lanza sin ventana (`windowStyle 0`) el supervisor `run-server.cmd`, que ejecuta `node server.js` en bucle y lo relanza a los 2 s si el proceso muere (crash o error de red fatal), sin reiniciar la PC. Para que arranque al iniciar sesión, se copia el `.vbs` a la carpeta de Inicio del usuario (no requiere admin):
+
+```powershell
+Copy-Item start-hidden.vbs -Destination ([Environment]::GetFolderPath('Startup')) -Force
+```
+
+- **Desactivar:** borrar `start-hidden.vbs` de `shell:startup`.
+- **Parar el servidor en marcha:** `Get-Process node | Stop-Process` (o desde el Administrador de tareas).
+- Si Node no está en `C:\Program Files\nodejs\node.exe`, editar la ruta dentro de `run-server.cmd`.
+
 ### Variables de entorno
 
 | Variable | Defecto | Descripción |
@@ -34,6 +46,8 @@ Servidor por defecto en `http://0.0.0.0:3000`.
 | `PROJECTS_DIRS` | carpeta que contiene el repo | Raíces (separadas por `;`) donde buscar proyectos |
 | `PROJECTS_DEPTH` | `3` | Profundidad máxima al buscar proyectos anidados dentro de las raíces |
 | `CLAUDE_CWD` | home del usuario | Carpeta por defecto si no se elige proyecto |
+| `SESSION_IDLE_MS` | `0` (nunca) | Ms que sobrevive la sesión sin clientes conectados. `0` = sigue en segundo plano hasta pulsar "Cerrar" |
+| `SESSION_BUFFER_BYTES` | `200000` | Tope del buffer de pantalla que se reenvía al reconectar |
 | `APK_PATH` | `claude-remote.apk` (raíz) | Ruta del APK que sirve el autoactualizador |
 
 ## Conexión desde Android (Tailscale)
@@ -98,6 +112,10 @@ Para publicar una versión nueva: subí `versionCode`/`versionName` en `android/
 | `GET /download/app.apk` | Descarga el APK (`APK_PATH`) para el autoactualizador |
 
 **WebSocket** (`/ws`): el cliente envía `{ type: "start", cwd }` para iniciar Claude en la carpeta elegida (solo si está bajo `PROJECTS_DIRS` o es una carpeta conocida por Claude), luego `input`/`resize`.
+
+**Memoria y trabajo en segundo plano:** hay una sesión viva por carpeta que **sobrevive a la desconexión** del WebSocket. Al reconectar, el servidor reenvía la pantalla previa (`{ type: "restore" }`) para no perder lo visible. Si la carpeta ya tiene historial de Claude, la conversación se **reanuda con `--continue`** (recuerda todo el contexto anterior); para empezar de cero, mandar `{ type: "start", cwd, fresh: true }`.
+
+El proceso **sigue trabajando en segundo plano** aunque bloquees el celular o cambies de app: la flecha ← vuelve al selector sin detenerlo. Solo se detiene al pulsar **"Cerrar"** (`{ type: "stop" }`) o el ✕ del selector (`POST /api/sessions/stop`); la memoria queda guardada y se reanuda con `--continue`. Por defecto no se apaga nunca solo (`SESSION_IDLE_MS=0`); poné un valor en ms para forzar un apagado por inactividad. El selector marca las carpetas **"en curso"** (`GET /api/sessions`). Buffer de pantalla acotado a `SESSION_BUFFER_BYTES` (def. 200 KB).
 
 ## Seguridad
 

@@ -39,6 +39,14 @@ const IGNORE_DIRS = new Set([
 // Autoactualización del APK.
 const APK_PATH = process.env.APK_PATH || join(__dirname, "claude-remote.apk");
 const APP_VERSION_PATH = join(__dirname, "app-version.json");
+// Persistencia de sesión: el proceso Claude sigue vivo entre reconexiones y se
+// guarda un buffer de su salida para re-dibujar la pantalla al reconectar.
+const SESSION_BUFFER_BYTES = Math.max(16_384, parseInt(process.env.SESSION_BUFFER_BYTES || "200000", 10));
+// Cuánto se mantiene vivo el proceso sin clientes conectados. Por defecto 0 =
+// NUNCA se apaga solo: sigue trabajando en segundo plano (aunque bloquees el
+// celular o cambies de app) hasta que pulses "Cerrar". Poné un valor en ms para
+// forzar un apagado por inactividad.
+const SESSION_IDLE_MS = Math.max(0, parseInt(process.env.SESSION_IDLE_MS || "0", 10));
 
 // Argumentos según el shell REAL, no según el SO (evita mezclar estilos).
 function shellArgs(shell, cmd) {
@@ -147,6 +155,16 @@ const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const app = express();
 const server = createServer(app);
 
+// Red superior: un error de socket transitorio (p. ej. al cambiar de Wi-Fi)
+// no debe tumbar el proceso. Se registra y se sigue sirviendo.
+process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
+process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", err));
+server.on("error", (err) => {
+  console.error("[http error]", err);
+  if (err.code === "EADDRINUSE") process.exit(1); // el supervisor reintenta
+});
+
+app.use(express.json());
 app.use(express.static(join(__dirname, "public")));
 
 // --- Métricas de uso -------------------------------------------------------
@@ -179,10 +197,17 @@ app.get("/api/usage", async (_req, res) => {
     }
 
     const data = await upstream.json();
-    // Normaliza los campos relevantes sin descartar el payload original.
+    // Detecta todas las ventanas de uso (five_hour, seven_day, …) sin descartar el payload.
+    const windows = {};
+    for (const [k, v] of Object.entries(data)) {
+      if (v && typeof v === "object" && ("utilization" in v || "resets_at" in v)) {
+        windows[k] = { utilization: v.utilization ?? null, resets_at: v.resets_at ?? null };
+      }
+    }
     res.json({
       utilization: data.utilization ?? data.five_hour?.utilization ?? null,
       resets_at: data.resets_at ?? data.five_hour?.resets_at ?? null,
+      windows,
       raw: data,
     });
   } catch (err) {
@@ -254,51 +279,131 @@ app.get("/api/projects", async (_req, res) => {
 // --- Terminal PTY vía WebSocket -------------------------------------------
 const wss = new WebSocketServer({ server, path: "/ws" });
 
-wss.on("connection", (ws) => {
-  let pty = null;
+// Sesiones vivas, una por carpeta (clave = ruta normalizada). Sobreviven a la
+// desconexión del WebSocket para que reconectar no reinicie la conversación.
+const sessions = new Map();
 
-  async function startPty(cwd) {
-    if (pty) return;
+// Agrega salida al buffer y recorta el historial más viejo si supera el tope.
+function pushBuffer(s, data) {
+  s.buffer.push(data);
+  s.bytes += Buffer.byteLength(data);
+  while (s.bytes > SESSION_BUFFER_BYTES && s.buffer.length > 1) {
+    s.bytes -= Buffer.byteLength(s.buffer.shift());
+  }
+}
+
+function broadcast(s, obj) {
+  const frame = JSON.stringify(obj);
+  for (const c of s.clients) if (c.readyState === c.OPEN) c.send(frame);
+}
+
+// Detiene la sesión de una carpeta (botón "Cerrar"). El onExit del PTY se
+// encarga del broadcast de salida y de borrarla del mapa.
+function stopSession(key) {
+  const s = sessions.get(key);
+  if (!s) return false;
+  if (s.killTimer) { clearTimeout(s.killTimer); s.killTimer = null; }
+  try { s.pty.kill(); } catch { /* ya había terminado */ }
+  return true;
+}
+
+// --- Sesiones en segundo plano (verlas y cerrarlas desde el selector) -------
+app.get("/api/sessions", (_req, res) => {
+  const list = [...sessions.values()].map((s) => ({ path: s.cwd, clients: s.clients.size }));
+  res.json({ sessions: list });
+});
+app.post("/api/sessions/stop", (req, res) => {
+  const path = req.body?.path;
+  if (!path) return res.status(400).json({ error: "falta 'path'" });
+  res.json({ stopped: stopSession(norm(path)) });
+});
+
+wss.on("connection", (ws) => {
+  let session = null;
+  let key = null;
+
+  async function attach(cwd, fresh) {
+    if (session) return; // este socket ya está adjunto a una sesión
     const dir = (await isAllowed(cwd)) ? cwd : START_DIR;
-    try {
-      pty = spawn(SHELL, shellArgs(SHELL, CLAUDE_CMD), {
-        name: "xterm-color",
-        cols: 80,
-        rows: 24,
-        cwd: dir,
-        env: process.env,
+    key = norm(dir);
+
+    let s = sessions.get(key);
+    if (!s) {
+      // No hay proceso vivo para esta carpeta: se crea uno.
+      // Si ya existe historial de Claude aquí y no se pidió empezar de cero,
+      // se reanuda la conversación anterior con --continue.
+      const known = await listKnownProjectPaths();
+      const resume =
+        !fresh &&
+        CLAUDE_CMD.includes("claude") &&
+        known.some((k) => norm(k) === key);
+      const cmd = resume ? `${CLAUDE_CMD} --continue` : CLAUDE_CMD;
+
+      let pty;
+      try {
+        pty = spawn(SHELL, shellArgs(SHELL, cmd), {
+          name: "xterm-color",
+          cols: 80,
+          rows: 24,
+          cwd: dir,
+          env: process.env,
+        });
+      } catch (err) {
+        if (ws.readyState === ws.OPEN)
+          ws.send(JSON.stringify({ type: "output", data: `\r\n[error al iniciar: ${err.message}]\r\n` }));
+        return;
+      }
+
+      s = { pty, cwd: dir, buffer: [], bytes: 0, clients: new Set(), killTimer: null };
+      sessions.set(key, s);
+
+      pty.onData((data) => {
+        pushBuffer(s, data);
+        broadcast(s, { type: "output", data });
       });
-    } catch (err) {
-      if (ws.readyState === ws.OPEN)
-        ws.send(JSON.stringify({ type: "output", data: `\r\n[error al iniciar: ${err.message}]\r\n` }));
-      return;
+
+      pty.onExit(({ exitCode }) => {
+        if (s.killTimer) clearTimeout(s.killTimer);
+        broadcast(s, { type: "exit", code: exitCode });
+        sessions.delete(key);
+      });
     }
 
-    pty.onData((data) => {
-      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "output", data }));
-    });
+    // Adjunta este socket y cancela el apagado por inactividad.
+    if (s.killTimer) { clearTimeout(s.killTimer); s.killTimer = null; }
+    s.clients.add(ws);
+    session = s;
 
-    pty.onExit(({ exitCode }) => {
-      if (ws.readyState === ws.OPEN) {
-        ws.send(JSON.stringify({ type: "exit", code: exitCode }));
-        ws.close();
-      }
-    });
+    // Re-dibuja en el cliente lo que ya había en pantalla.
+    if (s.buffer.length && ws.readyState === ws.OPEN)
+      ws.send(JSON.stringify({ type: "restore", data: s.buffer.join("") }));
   }
 
   ws.on("message", (msg) => {
     try {
-      const { type, data, cols, rows, cwd } = JSON.parse(msg.toString());
-      if (type === "start") startPty(cwd);
-      else if (type === "input" && pty) pty.write(data);
-      else if (type === "resize" && pty) pty.resize(cols, rows);
+      const { type, data, cols, rows, cwd, fresh } = JSON.parse(msg.toString());
+      if (type === "start") attach(cwd, fresh);
+      else if (type === "input" && session?.pty) session.pty.write(data);
+      else if (type === "resize" && session?.pty) session.pty.resize(cols, rows);
+      else if (type === "stop" && key) stopSession(key); // "Cerrar": detiene el proceso
     } catch {
       /* ignora frames malformados */
     }
   });
 
   ws.on("close", () => {
-    if (pty) pty.kill();
+    if (!session) return;
+    session.clients.delete(ws);
+    // Sin clientes el proceso sigue vivo en segundo plano. Solo se programa un
+    // apagado si SESSION_IDLE_MS > 0; con 0 (def.) vive hasta pulsar "Cerrar".
+    if (session.clients.size === 0 && SESSION_IDLE_MS > 0) {
+      const s = session, k = key;
+      s.killTimer = setTimeout(() => {
+        try { s.pty.kill(); } catch { /* ya terminó */ }
+        sessions.delete(k);
+      }, SESSION_IDLE_MS);
+    }
+    session = null;
   });
 });
 

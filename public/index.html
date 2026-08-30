@@ -13,6 +13,8 @@
   <style>
     html, body { height: 100%; overscroll-behavior: none; }
     #terminal { height: 100%; }
+    /* Permite desplazar el historial con el dedo en el celular. */
+    .xterm-viewport { touch-action: pan-y; -webkit-overflow-scrolling: touch; }
   </style>
 </head>
 <body class="bg-slate-900 text-slate-100 flex flex-col h-screen">
@@ -20,10 +22,13 @@
   <header class="bg-slate-800 px-3 py-2 shadow-lg shrink-0">
     <div class="flex items-center justify-between text-xs mb-1">
       <div class="flex items-center gap-2 min-w-0">
-        <button id="backBtn" class="hidden bg-slate-700 active:bg-emerald-600 rounded px-2 py-0.5 text-[11px]">‹ Proyectos</button>
+        <button id="backBtn" title="Volver a proyectos" class="hidden bg-slate-700 active:bg-emerald-600 rounded-full w-7 h-7 flex items-center justify-center text-lg leading-none shrink-0">&#8592;</button>
         <span id="proj-name" class="font-semibold truncate">Uso de tokens</span>
       </div>
-      <span id="reset-timer" class="font-mono text-amber-400 shrink-0">--:--:--</span>
+      <div class="flex items-center gap-2 shrink-0">
+        <button id="stopBtn" title="Cerrar la sesión (detiene el proceso)" class="hidden bg-red-600 active:bg-red-500 rounded px-2 py-0.5 text-[11px] font-semibold">Cerrar</button>
+        <span id="reset-timer" class="font-mono text-amber-400">--:--:--</span>
+      </div>
     </div>
     <div class="w-full bg-slate-700 rounded-full h-2.5 overflow-hidden">
       <div id="usage-bar" class="bg-emerald-500 h-2.5 rounded-full transition-all duration-500" style="width:0%"></div>
@@ -44,15 +49,32 @@
   <!-- Terminal -->
   <main id="terminal" class="flex-1 min-h-0 px-1 py-1 hidden"></main>
 
+  <!-- Salta al final tras subir a leer el historial -->
+  <button id="scrollBottomBtn" title="Ir al final" class="hidden fixed right-3 bottom-20 z-40 bg-slate-700/90 active:bg-emerald-600 rounded-full w-10 h-10 text-lg shadow-lg">&#8595;</button>
+
   <!-- Botones rápidos -->
   <footer id="quickbar" class="hidden bg-slate-800 px-2 py-2 gap-2 shrink-0 overflow-x-auto flex">
     <button data-cmd="/compact">/compact</button>
     <button data-cmd="/clear">/clear</button>
-    <button data-cmd="/cost">/cost</button>
+    <button id="usageBtn">📊 Uso</button>
     <button data-key="esc">Esc</button>
     <button data-key="tab">Tab</button>
     <button data-key="ctrlc">Ctrl+C</button>
   </footer>
+
+  <!-- Panel de uso detallado (botón "Uso") -->
+  <div id="usage-modal" class="hidden fixed inset-0 z-50 bg-black/60 flex items-end">
+    <div class="bg-slate-800 w-full rounded-t-2xl p-4 space-y-4 max-h-[80%] overflow-y-auto">
+      <div class="flex items-center justify-between">
+        <h2 class="text-base font-semibold">Uso de tu plan</h2>
+        <button id="usage-close" class="text-slate-400 text-lg px-2 active:text-white">&#10005;</button>
+      </div>
+      <div id="usage-windows" class="space-y-4">
+        <p class="text-sm text-slate-400">Cargando…</p>
+      </div>
+      <p id="usage-updated" class="text-[11px] text-slate-500"></p>
+    </div>
+  </div>
 
   <script>
     // Estilo compartido de los botones de la barra rápida.

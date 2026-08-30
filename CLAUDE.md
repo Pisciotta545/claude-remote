@@ -17,6 +17,8 @@ PWA + backend Node.js para controlar Claude CLI desde Android (red local / Tails
 server.js            Express + WS (/ws) + PTY + APIs usage/projects/app-version + /download/app.apk
 package.json         Dependencias: express, node-pty, ws
 app-version.json     versionCode/versionName del APK servido (autoupdate)
+run-server.cmd       Supervisor Windows: corre node server.js en bucle y lo relanza si muere
+start-hidden.vbs     Arranque oculto (windowStyle 0) del supervisor; se copia a shell:startup
 claude-remote.apk    APK que sirve el autoactualizador (ignorado por git)
 public/index.html    UI móvil + selector de proyectos (Tailwind CDN)
 public/app.js        xterm.js, WebSocket, selector de proyectos, métricas, botones rápidos
@@ -34,7 +36,9 @@ android/             APK nativo (WebView) con selector de proyectos y autoupdate
 | `GET /api/projects` | Lista proyectos: subcarpetas de nivel 1 de `PROJECTS_DIRS` (def.: carpeta padre del repo) + anidados con marcador (`.git`, `package.json`, etc., hasta `PROJECTS_DEPTH`=3) + carpetas que Claude ya conoce (lee `cwd` de `~/.claude/projects/*/*.jsonl`, aunque estén en otra unidad). Deduplica por ruta |
 | `GET /api/app-version` | Versión del APK (lee `app-version.json`) |
 | `GET /download/app.apk` | Sirve `APK_PATH` para el autoupdate |
-| WS `/ws` | `{type:"start",cwd}` inicia Claude en la carpeta (solo si `cwd` está bajo `PROJECTS_DIRS` o es una carpeta conocida por Claude), luego `input`/`resize`. Comando por defecto: `claude --dangerously-skip-permissions` (sin prompts de permiso); override con `CLAUDE_CMD` |
+| `GET /api/sessions` | Sesiones vivas en segundo plano: `[{path,clients}]` (marca proyectos "en curso" en el selector) |
+| `POST /api/sessions/stop` | Body `{path}`: detiene la sesión de esa carpeta (botón ✕ del selector) |
+| WS `/ws` | `{type:"start",cwd}` inicia Claude en la carpeta (solo si `cwd` está bajo `PROJECTS_DIRS` o es una carpeta conocida por Claude), luego `input`/`resize`/`stop`. Comando por defecto: `claude --dangerously-skip-permissions` (sin prompts de permiso); override con `CLAUDE_CMD`. **Sesión persistente por carpeta:** el proceso sobrevive a la desconexión del WS y al reconectar se reenvía la pantalla (`{type:"restore"}`); si hay historial, la conversación se reanuda con `--continue` (salvo `{type:"start",cwd,fresh:true}`). Sigue vivo en segundo plano hasta `{type:"stop"}` (botón "Cerrar"); `SESSION_IDLE_MS` (def. 0 = nunca) fuerza apagado por inactividad; buffer acotado a `SESSION_BUFFER_BYTES` (def. 200 KB) |
 
 ### App Android (`android/`)
 
