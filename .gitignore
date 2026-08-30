@@ -5,3 +5,12 @@ npm-debug.log*
 *.log
 .DS_Store
 Thumbs.db
+
+# Android build
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/build-log.txt
+android/.idea/
+*.apk

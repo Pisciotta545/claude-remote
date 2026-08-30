@@ -41,6 +41,28 @@ Servidor por defecto en `http://0.0.0.0:3000`.
 
 > En red local usa la IP LAN del servidor en lugar de la de Tailscale.
 
+## App Android (APK)
+
+Alternativa a la PWA: un APK nativo (`android/`) que envuelve la web en un `WebView`, con ícono propio y pantalla completa. **Sigue necesitando el servidor de la PC corriendo** (es un cliente remoto).
+
+### Compilar
+
+Requiere SDK de Android (`ANDROID_HOME`) + JDK 17.
+
+```bash
+cd android
+./gradlew.bat assembleDebug   # Windows (usar ./gradlew en Linux/Mac)
+```
+
+APK firmado (clave de debug) en `android/app/build/outputs/apk/debug/app-debug.apk`.
+
+### Instalar y usar
+
+1. Pasá el `.apk` al celu (USB, Telegram, Drive) y abrilo, o `adb install app-debug.apk`.
+2. Permití "Instalar apps de orígenes desconocidos" si Android lo pide.
+3. Abrí **Claude Remote**, ingresá `IP:puerto` (ej. `100.x.y.z:3000`) y tocá **Conectar**.
+4. Para cambiar la dirección después: menú **⋮ → Cambiar servidor**.
+
 ## Arquitectura
 
 | Componente | Archivo | Función |
