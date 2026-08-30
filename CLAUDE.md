@@ -31,10 +31,10 @@ android/             APK nativo (WebView) con selector de proyectos y autoupdate
 | Ruta | Función |
 |------|---------|
 | `GET /api/usage` | Uso de tokens (lee credenciales, consulta API OAuth) |
-| `GET /api/projects` | Lista subcarpetas de `PROJECTS_DIRS` (def.: carpeta del repo) |
+| `GET /api/projects` | Lista proyectos: subcarpetas de nivel 1 de `PROJECTS_DIRS` (def.: carpeta padre del repo) + anidados con marcador (`.git`, `package.json`, etc., hasta `PROJECTS_DEPTH`=3) + carpetas que Claude ya conoce (lee `cwd` de `~/.claude/projects/*/*.jsonl`, aunque estén en otra unidad). Deduplica por ruta |
 | `GET /api/app-version` | Versión del APK (lee `app-version.json`) |
 | `GET /download/app.apk` | Sirve `APK_PATH` para el autoupdate |
-| WS `/ws` | `{type:"start",cwd}` inicia Claude en la carpeta, luego `input`/`resize` |
+| WS `/ws` | `{type:"start",cwd}` inicia Claude en la carpeta (solo si `cwd` está bajo `PROJECTS_DIRS` o es una carpeta conocida por Claude), luego `input`/`resize`. Comando por defecto: `claude --dangerously-skip-permissions` (sin prompts de permiso); override con `CLAUDE_CMD` |
 
 ### App Android (`android/`)
 
