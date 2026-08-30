@@ -16,6 +16,8 @@ PWA + backend Node.js para controlar Claude CLI desde Android (red local / Tails
 ```
 server.js            Express + WS (/ws) + PTY + APIs usage/projects/app-version + /download/app.apk
 package.json         Dependencias: express, node-pty, ws
+push.js              Notificaciones push (FCM HTTP v1) sin deps: firma el JWT con crypto nativo; store de tokens
+firebase-service-account.json  Credencial para ENVIAR push (ignorada por git; sin ella el push queda desactivado)
 app-version.json     versionCode/versionName del APK servido (autoupdate)
 run-server.cmd       Supervisor Windows: corre node server.js en bucle y lo relanza si muere
 start-hidden.vbs     Arranque oculto (windowStyle 0) del supervisor; se copia a shell:startup
@@ -38,21 +40,27 @@ android/             APK nativo (WebView) con selector de proyectos y autoupdate
 | `GET /download/app.apk` | Sirve `APK_PATH` para el autoupdate |
 | `GET /api/sessions` | Sesiones vivas en segundo plano: `[{path,clients}]` (marca proyectos "en curso" en el selector) |
 | `POST /api/sessions/stop` | Body `{path}`: detiene la sesión de esa carpeta (botón ✕ del selector) |
+| `POST /api/push/register` | Body `{token}`: registra el token FCM del dispositivo (persiste en `push-tokens.json`) |
+| `POST /api/push/unregister` | Body `{token}`: da de baja el token |
 | WS `/ws` | `{type:"start",cwd}` inicia Claude en la carpeta (solo si `cwd` está bajo `PROJECTS_DIRS` o es una carpeta conocida por Claude), luego `input`/`resize`/`stop`. Comando por defecto: `claude --dangerously-skip-permissions` (sin prompts de permiso); override con `CLAUDE_CMD`. **Sesión persistente por carpeta:** el proceso sobrevive a la desconexión del WS y al reconectar se reenvía la pantalla (`{type:"restore"}`); si hay historial, la conversación se reanuda con `--continue` (salvo `{type:"start",cwd,fresh:true}`). Sigue vivo en segundo plano hasta `{type:"stop"}` (botón "Cerrar"); `SESSION_IDLE_MS` (def. 0 = nunca) fuerza apagado por inactividad; buffer acotado a `SESSION_BUFFER_BYTES` (def. 200 KB) |
+
+**Push (FCM):** al detectar la campana de terminal (`\x07`) en una sesión **sin clientes conectados** (no la estás mirando), el servidor manda una notificación "Claude te necesita" a los dispositivos registrados (antirrebote 4 s). Requiere `firebase-service-account.json` (si falta, el push queda desactivado y el resto funciona igual).
 
 ### App Android (`android/`)
 
-APK mínimo sin dependencias externas (solo APIs de plataforma). Es un **cliente**: envuelve la web del servidor en un `WebView`; el servidor de la PC debe seguir corriendo.
+Es un **cliente**: envuelve la web del servidor en un `WebView` y recibe notificaciones push (FCM); el servidor de la PC debe seguir corriendo.
 
 | Archivo | Función |
 |---------|---------|
-| `app/src/main/java/com/claude/remote/MainActivity.java` | Config `IP:puerto`, `WebView`, menú (Cambiar servidor / Buscar actualización) y autoupdater |
+| `app/src/main/java/com/claude/remote/MainActivity.java` | Config `IP:puerto`, `WebView`, menú (Cambiar servidor / Buscar actualización), autoupdater, permiso de notificaciones y registro del token FCM |
+| `app/src/main/java/com/claude/remote/PushService.java` | `FirebaseMessagingService`: muestra la notificación y registra el token en `/api/push/register` |
 | `app/src/main/res/layout/config.xml` | Formulario de dirección del servidor |
 | `app/src/main/res/xml/file_paths.xml` | Rutas del `FileProvider` (para instalar el APK descargado) |
-| `app/src/main/AndroidManifest.xml` | Permisos (`INTERNET`, `REQUEST_INSTALL_PACKAGES`), `usesCleartextTraffic`, `FileProvider` |
-| `build.gradle`, `app/build.gradle` | AGP 8.5.2 · compileSdk 35 · minSdk 24 · Java 17 · dep `androidx.core` |
+| `app/src/main/AndroidManifest.xml` | Permisos (`INTERNET`, `REQUEST_INSTALL_PACKAGES`, `POST_NOTIFICATIONS`), `usesCleartextTraffic`, `FileProvider`, servicio FCM + canal `claude` |
+| `app/google-services.json` | Config del proyecto Firebase (ignorada por git; necesaria para compilar) |
+| `build.gradle`, `app/build.gradle` | AGP 8.5.2 · compileSdk 35 · minSdk 24 · Java 17 · deps `androidx.core` + `firebase-bom`/`firebase-messaging` · plugin `google-services` |
 
-Requiere SDK de Android (`ANDROID_HOME`) + JDK 17. El APK debug queda firmado con la clave de debug (instalable directo).
+Requiere SDK de Android (`ANDROID_HOME`) + JDK 17 y `app/google-services.json`. El APK debug queda firmado con la clave de debug (instalable directo).
 
 **Publicar versión nueva:** subir `versionCode`/`versionName` en `app/build.gradle` **y** en `app-version.json`, recompilar y copiar el APK a `claude-remote.apk`.
 

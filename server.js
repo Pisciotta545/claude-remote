@@ -8,6 +8,7 @@ import { createInterface } from "readline";
 import { homedir } from "os";
 import { join, dirname, resolve, sep, basename } from "path";
 import { fileURLToPath } from "url";
+import { pushEnabled, addToken, removeToken, sendPush } from "./push.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
@@ -318,6 +319,33 @@ app.post("/api/sessions/stop", (req, res) => {
   res.json({ stopped: stopSession(norm(path)) });
 });
 
+// --- Notificaciones push (registro de dispositivos) ------------------------
+app.post("/api/push/register", (req, res) => {
+  const token = req.body?.token;
+  if (!token) return res.status(400).json({ error: "falta 'token'" });
+  addToken(token);
+  res.json({ ok: true, enabled: pushEnabled() });
+});
+app.post("/api/push/unregister", (req, res) => {
+  removeToken(req.body?.token);
+  res.json({ ok: true });
+});
+
+// Avisa cuando Claude emite la campana (BEL) —terminó o espera tu respuesta—,
+// pero solo si NO lo estás mirando (sesión sin clientes) y con antirrebote.
+const BELL_DEBOUNCE_MS = 4000;
+function maybeNotify(s) {
+  if (!pushEnabled() || s.clients.size > 0) return;
+  const now = Date.now();
+  if (now - (s.lastBell || 0) < BELL_DEBOUNCE_MS) return;
+  s.lastBell = now;
+  sendPush({
+    title: "Claude te necesita",
+    body: `${basename(s.cwd)} · esperando tu respuesta`,
+    data: { path: s.cwd },
+  });
+}
+
 wss.on("connection", (ws) => {
   let session = null;
   let key = null;
@@ -360,6 +388,7 @@ wss.on("connection", (ws) => {
       pty.onData((data) => {
         pushBuffer(s, data);
         broadcast(s, { type: "output", data });
+        if (data.includes("\x07")) maybeNotify(s); // campana → aviso push
       });
 
       pty.onExit(({ exitCode }) => {
@@ -409,4 +438,5 @@ wss.on("connection", (ws) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`Claude Remote → http://${HOST}:${PORT}`);
+  console.log(`Push FCM: ${pushEnabled() ? "activo" : "desactivado (falta firebase-service-account.json)"}`);
 });

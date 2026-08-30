@@ -48,6 +48,8 @@ Copy-Item start-hidden.vbs -Destination ([Environment]::GetFolderPath('Startup')
 | `CLAUDE_CWD` | home del usuario | Carpeta por defecto si no se elige proyecto |
 | `SESSION_IDLE_MS` | `0` (nunca) | Ms que sobrevive la sesión sin clientes conectados. `0` = sigue en segundo plano hasta pulsar "Cerrar" |
 | `SESSION_BUFFER_BYTES` | `200000` | Tope del buffer de pantalla que se reenvía al reconectar |
+| `FIREBASE_SA_PATH` | `firebase-service-account.json` (raíz) | Service account de Firebase para enviar push. Si falta, el push queda desactivado |
+| `PUSH_TOKENS_PATH` | `push-tokens.json` (raíz) | Archivo donde se guardan los tokens FCM de los dispositivos |
 | `APK_PATH` | `claude-remote.apk` (raíz) | Ruta del APK que sirve el autoactualizador |
 
 ## Conexión desde Android (Tailscale)
@@ -110,12 +112,28 @@ Para publicar una versión nueva: subí `versionCode`/`versionName` en `android/
 | `GET /api/projects` | Lista `{ projects: [{ name, path }] }`: subcarpetas de nivel 1 de `PROJECTS_DIRS` + proyectos anidados con marcador (`.git`, `package.json`, etc., hasta `PROJECTS_DEPTH`) + carpetas ya conocidas por Claude (leídas de `~/.claude/projects/*/*.jsonl`). Deduplica por ruta |
 | `GET /api/app-version` | Versión del APK servido → `{ versionCode, versionName, url }` |
 | `GET /download/app.apk` | Descarga el APK (`APK_PATH`) para el autoactualizador |
+| `GET /api/sessions` | Sesiones vivas en segundo plano → `{ sessions: [{ path, clients }] }` |
+| `POST /api/sessions/stop` | Body `{ path }`: detiene la sesión de esa carpeta |
+| `POST /api/push/register` | Body `{ token }`: registra el token FCM del dispositivo |
+| `POST /api/push/unregister` | Body `{ token }`: da de baja el token |
 
 **WebSocket** (`/ws`): el cliente envía `{ type: "start", cwd }` para iniciar Claude en la carpeta elegida (solo si está bajo `PROJECTS_DIRS` o es una carpeta conocida por Claude), luego `input`/`resize`.
 
 **Memoria y trabajo en segundo plano:** hay una sesión viva por carpeta que **sobrevive a la desconexión** del WebSocket. Al reconectar, el servidor reenvía la pantalla previa (`{ type: "restore" }`) para no perder lo visible. Si la carpeta ya tiene historial de Claude, la conversación se **reanuda con `--continue`** (recuerda todo el contexto anterior); para empezar de cero, mandar `{ type: "start", cwd, fresh: true }`.
 
 El proceso **sigue trabajando en segundo plano** aunque bloquees el celular o cambies de app: la flecha ← vuelve al selector sin detenerlo. Solo se detiene al pulsar **"Cerrar"** (`{ type: "stop" }`) o el ✕ del selector (`POST /api/sessions/stop`); la memoria queda guardada y se reanuda con `--continue`. Por defecto no se apaga nunca solo (`SESSION_IDLE_MS=0`); poné un valor en ms para forzar un apagado por inactividad. El selector marca las carpetas **"en curso"** (`GET /api/sessions`). Buffer de pantalla acotado a `SESSION_BUFFER_BYTES` (def. 200 KB).
+
+## Notificaciones push (FCM)
+
+Cuando Claude termina o queda esperando tu respuesta emite la **campana de terminal**; si esa sesión **no tiene la app mirándola**, el servidor manda una notificación al celular ("Claude te necesita").
+
+**Puesta en marcha (una vez):**
+
+1. En [Firebase Console](https://console.firebase.google.com) → tu proyecto → **Project settings → General**, registrá una app Android con el paquete `com.claude.remote` y descargá `google-services.json` → ponelo en `android/app/google-services.json`.
+2. **Project settings → Service accounts → Generate new private key** → guardá el JSON como `firebase-service-account.json` en la raíz del repo (es el que usa el servidor para **enviar**; nunca lo subas a git).
+3. Recompilá e instalá el APK nuevo (trae el SDK de FCM y pide permiso de notificaciones).
+
+> `google-services.json` (recibir) y `firebase-service-account.json` (enviar) están en `.gitignore`. Sin el service account el push queda desactivado y todo lo demás funciona igual.
 
 ## Seguridad
 

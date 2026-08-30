@@ -1,9 +1,11 @@
 package com.claude.remote;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -18,6 +20,8 @@ import android.widget.EditText;
 import android.widget.Toast;
 
 import androidx.core.content.FileProvider;
+
+import com.google.firebase.messaging.FirebaseMessaging;
 
 import org.json.JSONObject;
 
@@ -67,7 +71,28 @@ public class MainActivity extends Activity {
         s.setDomStorageEnabled(true);
         web.setWebViewClient(new WebViewClient());
         web.loadUrl(url);
-        checkUpdate(false); // chequeo silencioso al abrir
+        checkUpdate(false);   // chequeo silencioso al abrir
+        ensureNotifications(); // permiso de notificaciones (Android 13+)
+        registerPush();        // registra el token FCM en el servidor
+    }
+
+    // --- Notificaciones push -----------------------------------------------
+
+    /** Pide el permiso de notificaciones en Android 13+ (antes no hace falta). */
+    private void ensureNotifications() {
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 100);
+        }
+    }
+
+    /** Obtiene el token FCM y lo manda al servidor configurado. */
+    private void registerPush() {
+        FirebaseMessaging.getInstance().getToken().addOnCompleteListener(task -> {
+            if (task.isSuccessful() && task.getResult() != null) {
+                PushService.sendTokenToServer(this, task.getResult());
+            }
+        });
     }
 
     @Override

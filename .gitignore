@@ -14,3 +14,8 @@ android/local.properties
 android/build-log.txt
 android/.idea/
 *.apk
+
+# Firebase / push (secretos y estado local, nunca al repo)
+firebase-service-account.json
+push-tokens.json
+android/app/google-services.json

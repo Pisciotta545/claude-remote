@@ -1,5 +1,6 @@
 plugins {
     id 'com.android.application'
+    id 'com.google.gms.google-services'
 }
 
 android {
@@ -10,8 +11,8 @@ android {
         applicationId "com.claude.remote"
         minSdk 24
         targetSdk 35
-        versionCode 2
-        versionName "1.1"
+        versionCode 3
+        versionName "1.2"
     }
 
     buildFeatures {
@@ -32,4 +33,6 @@ android {
 
 dependencies {
     implementation 'androidx.core:core:1.13.1'
+    implementation platform('com.google.firebase:firebase-bom:33.7.0')
+    implementation 'com.google.firebase:firebase-messaging'
 }
