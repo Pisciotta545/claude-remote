@@ -29,9 +29,10 @@ Servidor por defecto en `http://0.0.0.0:3000`.
 |----------|---------|-------------|
 | `PORT` | `3000` | Puerto HTTP/WebSocket |
 | `HOST` | `0.0.0.0` | Interfaz de escucha |
-| `CLAUDE_CMD` | `claude` | Comando a ejecutar en el PTY |
+| `CLAUDE_CMD` | `claude --dangerously-skip-permissions` | Comando a ejecutar en el PTY (sin prompts de permiso) |
 | `SHELL` | `powershell.exe` (Windows) · `bash` (Unix) | Shell que lanza el comando. Los argumentos se eligen según el shell real: PowerShell → `-NoLogo -Command`, cmd → `/c`, POSIX → `-lc` |
-| `PROJECTS_DIRS` | carpeta que contiene el repo | Raíces (separadas por `;`) cuyas subcarpetas se listan como proyectos |
+| `PROJECTS_DIRS` | carpeta que contiene el repo | Raíces (separadas por `;`) donde buscar proyectos |
+| `PROJECTS_DEPTH` | `3` | Profundidad máxima al buscar proyectos anidados dentro de las raíces |
 | `CLAUDE_CWD` | home del usuario | Carpeta por defecto si no se elige proyecto |
 | `APK_PATH` | `claude-remote.apk` (raíz) | Ruta del APK que sirve el autoactualizador |
 
@@ -92,12 +93,14 @@ Para publicar una versión nueva: subí `versionCode`/`versionName` en `android/
 | Endpoint | Función |
 |----------|---------|
 | `GET /api/usage` | Lee `~/.claude/.credentials.json`, consulta la API de uso y devuelve `{ utilization, resets_at, raw }` |
-| `GET /api/projects` | Lista subcarpetas de `PROJECTS_DIRS` → `{ projects: [{ name, path }] }` |
+| `GET /api/projects` | Lista `{ projects: [{ name, path }] }`: subcarpetas de nivel 1 de `PROJECTS_DIRS` + proyectos anidados con marcador (`.git`, `package.json`, etc., hasta `PROJECTS_DEPTH`) + carpetas ya conocidas por Claude (leídas de `~/.claude/projects/*/*.jsonl`). Deduplica por ruta |
 | `GET /api/app-version` | Versión del APK servido → `{ versionCode, versionName, url }` |
 | `GET /download/app.apk` | Descarga el APK (`APK_PATH`) para el autoactualizador |
 
-**WebSocket** (`/ws`): el cliente envía `{ type: "start", cwd }` para iniciar Claude en la carpeta elegida, luego `input`/`resize`.
+**WebSocket** (`/ws`): el cliente envía `{ type: "start", cwd }` para iniciar Claude en la carpeta elegida (solo si está bajo `PROJECTS_DIRS` o es una carpeta conocida por Claude), luego `input`/`resize`.
 
 ## Seguridad
 
 ⚠️ El endpoint da acceso completo a una terminal con tu sesión de Claude. Exponlo **solo** en red local o Tailscale, **nunca** en internet abierto.
+
+⚠️ Por defecto Claude corre con `--dangerously-skip-permissions` (sin confirmaciones): puede ejecutar acciones sin pedir permiso. Para restaurar los prompts, definí `CLAUDE_CMD=claude`.
