@@ -71,6 +71,14 @@ backBtn.addEventListener("click", showPicker);
 window.__crInProject = false;
 window.__crGoBack = () => showPicker();
 
+// Puente para abrir un proyecto por ruta al tocar la notificación push.
+window.__crOpenProject = (path) => {
+  if (!path) return;
+  const name = path.split(/[\\/]/).filter(Boolean).pop() || path;
+  if (ws) { ws.onclose = null; ws.close(); ws = null; } // corta la sesión anterior
+  openProject({ name, path });
+};
+
 // "Cerrar": detiene el proceso de esta carpeta (la memoria queda guardada y se
 // reanuda con --continue al reabrir). Luego vuelve al selector.
 stopBtn.addEventListener("click", () => {

@@ -35,14 +35,35 @@ public class MainActivity extends Activity {
 
     private WebView web;
     private SharedPreferences prefs;
+    private String pendingPath; // proyecto a abrir al tocar una notificación
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("cfg", MODE_PRIVATE);
+        if (getIntent() != null) pendingPath = getIntent().getStringExtra("path");
         String url = prefs.getString("url", null);
         if (url == null) showConfig();
         else showWeb(url);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (intent != null && intent.getStringExtra("path") != null) {
+            pendingPath = intent.getStringExtra("path");
+            maybeOpenPending();
+        }
+    }
+
+    /** Si hay un proyecto pendiente (de una notificación), lo abre en la web. */
+    private void maybeOpenPending() {
+        if (pendingPath == null || web == null) return;
+        final String p = pendingPath;
+        pendingPath = null;
+        web.post(() -> web.evaluateJavascript(
+            "window.__crOpenProject && window.__crOpenProject(" + JSONObject.quote(p) + ");", null));
     }
 
     private void showConfig() {
@@ -69,7 +90,12 @@ public class MainActivity extends Activity {
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
-        web.setWebViewClient(new WebViewClient());
+        web.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String u) {
+                maybeOpenPending(); // abre el proyecto de la notificación si lo hay
+            }
+        });
         web.loadUrl(url);
         checkUpdate(false);   // chequeo silencioso al abrir
         ensureNotifications(); // permiso de notificaciones (Android 13+)

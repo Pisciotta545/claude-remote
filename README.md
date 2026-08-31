@@ -124,7 +124,7 @@ El proceso **sigue trabajando en segundo plano** aunque bloquees el celular o ca
 
 ## Notificaciones push (FCM)
 
-Cuando Claude termina o queda esperando tu respuesta emite la **campana de terminal**; si esa sesión **no tiene la app mirándola**, el servidor manda una notificación al celular ("Claude te necesita").
+Cuando Claude termina o queda esperando tu respuesta emite la **campana de terminal**; si esa sesión **no tiene la app mirándola**, el servidor manda una notificación al celular ("Claude te necesita"). **Al tocarla, la app abre directo ese proyecto.**
 
 **Puesta en marcha (una vez):**
 

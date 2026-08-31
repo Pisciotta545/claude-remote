@@ -40,10 +40,10 @@ public class PushService extends FirebaseMessagingService {
             title = msg.getData().getOrDefault("title", title);
             body = msg.getData().getOrDefault("body", body);
         }
-        showNotification(title, body);
+        showNotification(title, body, msg.getData().get("path"));
     }
 
-    private void showNotification(String title, String body) {
+    private void showNotification(String title, String body, String path) {
         NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(
@@ -51,6 +51,7 @@ public class PushService extends FirebaseMessagingService {
         }
         Intent open = new Intent(this, MainActivity.class);
         open.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        if (path != null) open.putExtra("path", path); // al tocar, abre ese proyecto
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= PendingIntent.FLAG_IMMUTABLE;
         PendingIntent pi = PendingIntent.getActivity(this, 0, open, flags);
