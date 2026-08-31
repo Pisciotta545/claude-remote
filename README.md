@@ -25,15 +25,14 @@ Servidor por defecto en `http://0.0.0.0:3000`.
 
 ### Autoarranque oculto con Windows
 
-Dos archivos trabajan juntos: `start-hidden.vbs` lanza sin ventana (`windowStyle 0`) el supervisor `run-server.cmd`, que ejecuta `node server.js` en bucle y lo relanza a los 2 s si el proceso muere (crash o error de red fatal), sin reiniciar la PC. Para que arranque al iniciar sesión, se copia el `.vbs` a la carpeta de Inicio del usuario (no requiere admin):
+`tray.vbs` lanza `tray.ps1` sin ventana: el servidor queda **oculto** (solo visible en el Administrador de tareas) y se controla desde un **punto en la bandeja** (verde = corriendo, gris = detenido). Menú de clic derecho: *Abrir en el navegador · Detener/Arrancar · Reiniciar · Salir* (doble clic abre el navegador). El tray arranca el servidor, lo **supervisa** (lo relanza si se cae) y te deja pararlo o reiniciarlo a mano. Para que arranque al iniciar sesión:
 
 ```powershell
-Copy-Item start-hidden.vbs -Destination ([Environment]::GetFolderPath('Startup')) -Force
+Copy-Item tray.vbs -Destination ([Environment]::GetFolderPath('Startup')) -Force
 ```
 
-- **Desactivar:** borrar `start-hidden.vbs` de `shell:startup`.
-- **Parar el servidor en marcha:** `Get-Process node | Stop-Process` (o desde el Administrador de tareas).
-- Si Node no está en `C:\Program Files\nodejs\node.exe`, editar la ruta dentro de `run-server.cmd`.
+- **Desactivar:** borrar `tray.vbs` de `shell:startup` (o *Salir* desde el menú).
+- Detecta Node por el `PATH`; si no está, usa `C:\Program Files\nodejs\node.exe`.
 
 ### Variables de entorno
 

@@ -46,6 +46,7 @@ function showPicker() {
   stopBtn.classList.add("hidden");
   scrollBottomBtn.classList.add("hidden");
   projName.textContent = "Uso de tokens";
+  window.__crInProject = false; // el botón físico de Android sale de la app
   loadProjects();
 }
 
@@ -57,6 +58,7 @@ function openProject(proj) {
   backBtn.classList.remove("hidden");
   stopBtn.classList.remove("hidden");
   projName.textContent = proj.name;
+  window.__crInProject = true; // el botón físico de Android vuelve al selector
   fit.fit();
   connect();
   term.focus();
@@ -64,6 +66,10 @@ function openProject(proj) {
 
 // Flecha ←: vuelve al selector pero DEJA la sesión corriendo en segundo plano.
 backBtn.addEventListener("click", showPicker);
+
+// Puente con el botón físico "atrás" de la app Android (ver MainActivity).
+window.__crInProject = false;
+window.__crGoBack = () => showPicker();
 
 // "Cerrar": detiene el proceso de esta carpeta (la memoria queda guardada y se
 // reanuda con --continue al reabrir). Luego vuelve al selector.
@@ -193,6 +199,35 @@ scrollBottomBtn.addEventListener("click", () => {
   scrollBottomBtn.classList.add("hidden");
   term.focus();
 });
+
+// Scroll táctil: dentro del WebView xterm no desplaza el historial con el dedo,
+// así que traducimos el arrastre vertical en líneas de scroll. Arrastrar hacia
+// abajo muestra lo anterior; hacia arriba, lo más nuevo.
+let touchY = null, touchAcc = 0, touchMoved = false;
+const cellPx = () => Math.max(1, terminalEl.clientHeight / (term.rows || 24));
+terminalEl.addEventListener("touchstart", (e) => {
+  if (e.touches.length !== 1) { touchY = null; return; }
+  touchY = e.touches[0].clientY;
+  touchAcc = 0;
+  touchMoved = false;
+}, { passive: true });
+terminalEl.addEventListener("touchmove", (e) => {
+  if (touchY == null || e.touches.length !== 1) return;
+  const y = e.touches[0].clientY;
+  touchAcc += y - touchY;
+  touchY = y;
+  const lines = Math.trunc(touchAcc / cellPx());
+  if (lines !== 0) {
+    term.scrollLines(-lines);
+    touchAcc -= lines * cellPx();
+    touchMoved = true;
+  }
+}, { passive: true });
+// Si el gesto fue un scroll (no un toque), evitamos que abra el teclado.
+terminalEl.addEventListener("touchend", () => {
+  if (touchMoved) setTimeout(() => term.blur(), 0);
+  touchY = null;
+}, { passive: true });
 
 // --- Ajuste responsivo -----------------------------------------------------
 const onResize = () => {

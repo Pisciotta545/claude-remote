@@ -166,7 +166,11 @@ server.on("error", (err) => {
 });
 
 app.use(express.json());
-app.use(express.static(join(__dirname, "public")));
+// Sin caché para la app: el WebView de Android reusaba HTML/JS viejo tras
+// actualizar. Con no-store siempre baja la última versión.
+app.use(express.static(join(__dirname, "public"), {
+  setHeaders: (res) => res.setHeader("Cache-Control", "no-store"),
+}));
 
 // --- Métricas de uso -------------------------------------------------------
 async function readAccessToken() {

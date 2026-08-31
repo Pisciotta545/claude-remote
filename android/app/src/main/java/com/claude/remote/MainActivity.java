@@ -117,8 +117,19 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (web != null && web.canGoBack()) web.goBack();
-        else super.onBackPressed();
+        // Si la web está dentro de un proyecto, el botón físico vuelve al selector
+        // (sin cerrar la app ni cortar la sesión). Si ya está en el selector, sale.
+        if (web == null) {
+            super.onBackPressed();
+            return;
+        }
+        web.evaluateJavascript("window.__crInProject === true", value -> {
+            if ("true".equals(value)) {
+                web.evaluateJavascript("window.__crGoBack && window.__crGoBack();", null);
+            } else {
+                finish();
+            }
+        });
     }
 
     // --- Autoactualización -------------------------------------------------

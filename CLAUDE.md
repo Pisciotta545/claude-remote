@@ -19,8 +19,8 @@ package.json         Dependencias: express, node-pty, ws
 push.js              Notificaciones push (FCM HTTP v1) sin deps: firma el JWT con crypto nativo; store de tokens
 firebase-service-account.json  Credencial para ENVIAR push (ignorada por git; sin ella el push queda desactivado)
 app-version.json     versionCode/versionName del APK servido (autoupdate)
-run-server.cmd       Supervisor Windows: corre node server.js en bucle y lo relanza si muere
-start-hidden.vbs     Arranque oculto (windowStyle 0) del supervisor; se copia a shell:startup
+tray.ps1             Ícono de bandeja (Windows Forms): arranca/reinicia/detiene y supervisa el servidor (oculto)
+tray.vbs             Lanza tray.ps1 oculto (powershell -STA); se copia a shell:startup para autoarranque
 claude-remote.apk    APK que sirve el autoactualizador (ignorado por git)
 public/index.html    UI móvil + selector de proyectos (Tailwind CDN)
 public/app.js        xterm.js, WebSocket, selector de proyectos, métricas, botones rápidos
