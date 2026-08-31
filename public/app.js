@@ -28,6 +28,29 @@ const pickerHint = document.getElementById("picker-hint");
 let ws;
 let currentProject = null; // { name, path }
 
+// --- Diálogo de confirmación propio (en vez del confirm() nativo) ----------
+const confirmModal = document.getElementById("confirm-modal");
+const confirmTitle = document.getElementById("confirm-title");
+const confirmMsg = document.getElementById("confirm-msg");
+const confirmOk = document.getElementById("confirm-ok");
+const confirmCancel = document.getElementById("confirm-cancel");
+let confirmResolver = null;
+
+function crConfirm({ title = "Confirmar", message = "", okText = "Cerrar" } = {}) {
+  confirmTitle.textContent = title;
+  confirmMsg.textContent = message;
+  confirmOk.textContent = okText;
+  confirmModal.classList.remove("hidden");
+  return new Promise((resolve) => (confirmResolver = resolve));
+}
+function closeConfirm(val) {
+  confirmModal.classList.add("hidden");
+  if (confirmResolver) { confirmResolver(val); confirmResolver = null; }
+}
+confirmOk.addEventListener("click", () => closeConfirm(true));
+confirmCancel.addEventListener("click", () => closeConfirm(false));
+confirmModal.addEventListener("click", (e) => { if (e.target === confirmModal) closeConfirm(false); });
+
 // Escapa texto para insertarlo en innerHTML sin romper el markup.
 const escapeHtml = (s) =>
   String(s).replace(/[&<>"']/g, (c) =>
@@ -85,9 +108,14 @@ window.__crOpenProject = (path) => {
 
 // "Cerrar": detiene el proceso de esta carpeta (la memoria queda guardada y se
 // reanuda con --continue al reabrir). Luego vuelve al selector.
-stopBtn.addEventListener("click", () => {
+stopBtn.addEventListener("click", async () => {
   if (!currentProject) return;
-  if (!confirm(`¿Cerrar la sesión de "${currentProject.name}"?\nSe detiene el proceso en curso. La conversación queda guardada y se reanuda al reabrir el proyecto.`)) return;
+  const ok = await crConfirm({
+    title: `Cerrar "${currentProject.name}"`,
+    message: "Se detiene el proceso en curso. La conversación queda guardada y se reanuda al reabrir el proyecto.",
+    okText: "Cerrar",
+  });
+  if (!ok) return;
   send({ type: "stop" });
   showPicker();
 });
@@ -95,7 +123,12 @@ stopBtn.addEventListener("click", () => {
 // --- Lista de proyectos ----------------------------------------------------
 // Detiene una sesión en segundo plano desde el selector (botón ✕).
 async function stopSession(path, name) {
-  if (!confirm(`¿Cerrar la sesión en segundo plano de "${name}"?`)) return;
+  const ok = await crConfirm({
+    title: `Cerrar "${name}"`,
+    message: "Se detiene la sesión en segundo plano. La memoria se guarda y se reanuda al reabrir.",
+    okText: "Cerrar",
+  });
+  if (!ok) return;
   try {
     await fetch("/api/sessions/stop", {
       method: "POST",

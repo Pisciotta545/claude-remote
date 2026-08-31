@@ -80,6 +80,18 @@
     </div>
   </div>
 
+  <!-- Diálogo de confirmación propio (reemplaza el confirm() nativo) -->
+  <div id="confirm-modal" class="hidden fixed inset-0 z-[60] bg-black/60 flex items-center justify-center p-6">
+    <div class="bg-slate-800 border border-slate-700 rounded-2xl p-5 w-full max-w-sm shadow-xl">
+      <h2 id="confirm-title" class="text-base font-semibold mb-2">Confirmar</h2>
+      <p id="confirm-msg" class="text-sm text-slate-300 mb-5"></p>
+      <div class="flex gap-2 justify-end">
+        <button id="confirm-cancel" class="px-4 py-2 rounded-lg bg-slate-700 active:bg-slate-600 text-sm">Cancelar</button>
+        <button id="confirm-ok" class="px-4 py-2 rounded-lg bg-red-600 active:bg-red-500 text-sm font-semibold">Cerrar</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     // Estilo compartido de los botones de la barra rápida.
     document.querySelectorAll("#quickbar button").forEach((b) =>
