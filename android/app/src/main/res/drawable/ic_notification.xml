@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ícono chico de notificación: sunburst en blanco/silueta (Android lo tinta). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="7"
+        android:strokeLineCap="round"
+        android:pathData="M54,38 L54,10 M62,40.14 L76,15.9 M67.86,46 L92.1,32 M70,54 L98,54 M67.86,62 L92.1,76 M62,67.86 L76,92.1 M54,70 L54,98 M46,67.86 L32,92.1 M40.14,62 L15.9,76 M38,54 L10,54 M40.14,46 L15.9,32 M46,40.14 L32,15.9" />
+</vector>

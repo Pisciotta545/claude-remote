@@ -57,7 +57,7 @@ public class PushService extends FirebaseMessagingService {
         PendingIntent pi = PendingIntent.getActivity(this, 0, open, flags);
 
         NotificationCompat.Builder b = new NotificationCompat.Builder(this, CHANNEL)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
             .setContentText(body)
             .setAutoCancel(true)

@@ -55,6 +55,8 @@ Es un **cliente**: envuelve la web del servidor en un `WebView` y recibe notific
 | `app/src/main/java/com/claude/remote/MainActivity.java` | Config `IP:puerto`, `WebView`, menú (Cambiar servidor / Buscar actualización), autoupdater, permiso de notificaciones y registro del token FCM |
 | `app/src/main/java/com/claude/remote/PushService.java` | `FirebaseMessagingService`: muestra la notificación (con el `path` como extra para abrir el proyecto al tocarla) y registra el token en `/api/push/register` |
 | `app/src/main/res/layout/config.xml` | Formulario de dirección del servidor |
+| `app/src/main/res/drawable/ic_launcher.xml` | Ícono de la app (vector): sunburst de Claude (arcilla) sobre tile crema |
+| `app/src/main/res/drawable/ic_notification.xml` | Ícono chico de notificación (vector blanco/silueta); también `default_notification_icon` de FCM |
 | `app/src/main/res/xml/file_paths.xml` | Rutas del `FileProvider` (para instalar el APK descargado) |
 | `app/src/main/AndroidManifest.xml` | Permisos (`INTERNET`, `REQUEST_INSTALL_PACKAGES`, `POST_NOTIFICATIONS`), `usesCleartextTraffic`, `FileProvider`, servicio FCM + canal `claude` |
 | `app/google-services.json` | Config del proyecto Firebase (ignorada por git; necesaria para compilar) |
