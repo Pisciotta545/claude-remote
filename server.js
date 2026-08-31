@@ -307,6 +307,7 @@ function broadcast(s, obj) {
 function stopSession(key) {
   const s = sessions.get(key);
   if (!s) return false;
+  s.stopping = true; // el cierre es a propósito: no notificar por su campana
   if (s.killTimer) { clearTimeout(s.killTimer); s.killTimer = null; }
   try { s.pty.kill(); } catch { /* ya había terminado */ }
   return true;
@@ -339,7 +340,7 @@ app.post("/api/push/unregister", (req, res) => {
 // pero solo si NO lo estás mirando (sesión sin clientes) y con antirrebote.
 const BELL_DEBOUNCE_MS = 4000;
 function maybeNotify(s) {
-  if (!pushEnabled() || s.clients.size > 0) return;
+  if (!pushEnabled() || s.clients.size > 0 || s.stopping) return;
   const now = Date.now();
   if (now - (s.lastBell || 0) < BELL_DEBOUNCE_MS) return;
   s.lastBell = now;

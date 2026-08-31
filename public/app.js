@@ -116,8 +116,17 @@ stopBtn.addEventListener("click", async () => {
     okText: "Cerrar",
   });
   if (!ok) return;
-  send({ type: "stop" });
-  showPicker();
+  const path = currentProject.path;
+  showPicker(); // vuelve al selector y corta el WS
+  // Detiene la sesión por HTTP (no depende del timing del WebSocket).
+  try {
+    await fetch("/api/sessions/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+  } catch { /* si falla, seguirá figurando "en curso" y se puede reintentar */ }
+  loadProjects(); // refresca el estado "en curso"
 });
 
 // --- Lista de proyectos ----------------------------------------------------
