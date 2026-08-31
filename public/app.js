@@ -17,6 +17,9 @@ const terminalEl = document.getElementById("terminal");
 const quickbar = document.getElementById("quickbar");
 const backBtn = document.getElementById("backBtn");
 const stopBtn = document.getElementById("stopBtn");
+const scrollCtrls = document.getElementById("scrollCtrls");
+const scrollUpBtn = document.getElementById("scrollUpBtn");
+const scrollDownBtn = document.getElementById("scrollDownBtn");
 const scrollBottomBtn = document.getElementById("scrollBottomBtn");
 const projName = document.getElementById("proj-name");
 const projList = document.getElementById("proj-list");
@@ -44,7 +47,7 @@ function showPicker() {
   quickbar.classList.add("hidden");
   backBtn.classList.add("hidden");
   stopBtn.classList.add("hidden");
-  scrollBottomBtn.classList.add("hidden");
+  scrollCtrls.classList.add("hidden");
   projName.textContent = "Uso de tokens";
   window.__crInProject = false; // el botón físico de Android sale de la app
   loadProjects();
@@ -57,6 +60,7 @@ function openProject(proj) {
   quickbar.classList.remove("hidden");
   backBtn.classList.remove("hidden");
   stopBtn.classList.remove("hidden");
+  scrollCtrls.classList.remove("hidden");
   projName.textContent = proj.name;
   window.__crInProject = true; // el botón físico de Android vuelve al selector
   fit.fit();
@@ -197,29 +201,35 @@ function sendResize() {
 
 term.onData((data) => send({ type: "input", data }));
 
-// Botón "↓": aparece al subir a leer el historial; toca para volver al final.
+// Página de scroll = casi una pantalla de líneas.
+const pageLines = () => Math.max(1, (term.rows || 24) - 2);
+
+// El "↓ ir al final" solo aparece cuando estás mirando historial (no al fondo).
 term.onScroll(() => {
   const b = term.buffer.active;
   scrollBottomBtn.classList.toggle("hidden", b.viewportY >= b.baseY);
 });
+scrollUpBtn.addEventListener("click", () => term.scrollLines(-pageLines()));
+scrollDownBtn.addEventListener("click", () => term.scrollLines(pageLines()));
 scrollBottomBtn.addEventListener("click", () => {
   term.scrollToBottom();
   scrollBottomBtn.classList.add("hidden");
-  term.focus();
 });
 
-// Scroll táctil: dentro del WebView xterm no desplaza el historial con el dedo,
-// así que traducimos el arrastre vertical en líneas de scroll. Arrastrar hacia
-// abajo muestra lo anterior; hacia arriba, lo más nuevo.
+// Scroll táctil: dentro del WebView xterm no desplaza el historial con el dedo.
+// Capturamos el gesto en el propio elemento de xterm (fase de captura, antes de
+// que xterm lo tome como selección) y lo traducimos a líneas de scroll.
+// Arrastrar hacia abajo muestra lo anterior; hacia arriba, lo más nuevo.
+const scrollHost = term.element || terminalEl;
 let touchY = null, touchAcc = 0, touchMoved = false;
 const cellPx = () => Math.max(1, terminalEl.clientHeight / (term.rows || 24));
-terminalEl.addEventListener("touchstart", (e) => {
+scrollHost.addEventListener("touchstart", (e) => {
   if (e.touches.length !== 1) { touchY = null; return; }
   touchY = e.touches[0].clientY;
   touchAcc = 0;
   touchMoved = false;
-}, { passive: true });
-terminalEl.addEventListener("touchmove", (e) => {
+}, { passive: true, capture: true });
+scrollHost.addEventListener("touchmove", (e) => {
   if (touchY == null || e.touches.length !== 1) return;
   const y = e.touches[0].clientY;
   touchAcc += y - touchY;
@@ -230,12 +240,11 @@ terminalEl.addEventListener("touchmove", (e) => {
     touchAcc -= lines * cellPx();
     touchMoved = true;
   }
-}, { passive: true });
-// Si el gesto fue un scroll (no un toque), evitamos que abra el teclado.
-terminalEl.addEventListener("touchend", () => {
-  if (touchMoved) setTimeout(() => term.blur(), 0);
+}, { passive: true, capture: true });
+scrollHost.addEventListener("touchend", () => {
+  if (touchMoved) setTimeout(() => term.blur(), 0); // fue scroll: no abras teclado
   touchY = null;
-}, { passive: true });
+}, { passive: true, capture: true });
 
 // --- Ajuste responsivo -----------------------------------------------------
 const onResize = () => {

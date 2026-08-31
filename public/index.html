@@ -49,8 +49,12 @@
   <!-- Terminal -->
   <main id="terminal" class="flex-1 min-h-0 px-1 py-1 hidden"></main>
 
-  <!-- Salta al final tras subir a leer el historial -->
-  <button id="scrollBottomBtn" title="Ir al final" class="hidden fixed right-3 bottom-20 z-40 bg-slate-700/90 active:bg-emerald-600 rounded-full w-10 h-10 text-lg shadow-lg">&#8595;</button>
+  <!-- Controles de scroll del historial (siempre disponibles en un proyecto) -->
+  <div id="scrollCtrls" class="hidden fixed right-3 bottom-20 z-40 flex flex-col gap-2">
+    <button id="scrollUpBtn" title="Subir" class="bg-slate-700/90 active:bg-emerald-600 rounded-full w-10 h-10 text-lg shadow-lg">&#9650;</button>
+    <button id="scrollDownBtn" title="Bajar" class="bg-slate-700/90 active:bg-emerald-600 rounded-full w-10 h-10 text-lg shadow-lg">&#9660;</button>
+    <button id="scrollBottomBtn" title="Ir al final" class="hidden bg-emerald-600 active:bg-emerald-500 rounded-full w-10 h-10 text-lg shadow-lg">&#8595;</button>
+  </div>
 
   <!-- Botones rápidos -->
   <footer id="quickbar" class="hidden bg-slate-800 px-2 py-2 gap-2 shrink-0 overflow-x-auto flex">
