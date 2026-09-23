@@ -14,7 +14,9 @@ import { pushEnabled, addToken, removeToken, sendPush } from "./push.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || "0.0.0.0";
+// Solo local por defecto: desde afuera se entra por el nodo de Tailscale
+// (claude-remote-ts), que reenvía a 127.0.0.1. HOST=0.0.0.0 abre la red local.
+const HOST = process.env.HOST || "127.0.0.1";
 const SHELL = process.env.SHELL || (process.platform === "win32" ? "powershell.exe" : "bash");
 const CLAUDE_CMD = process.env.CLAUDE_CMD || "claude --dangerously-skip-permissions";
 const START_DIR = process.env.CLAUDE_CWD || homedir();

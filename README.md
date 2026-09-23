@@ -21,7 +21,7 @@ npm start        # producción
 npm run dev      # recarga automática
 ```
 
-Servidor por defecto en `http://0.0.0.0:3000`.
+Servidor por defecto en `http://127.0.0.1:3000` (solo local: desde el celular se entra por Tailscale).
 
 ### Autoarranque oculto con Windows
 
@@ -39,7 +39,7 @@ Copy-Item tray.vbs -Destination ([Environment]::GetFolderPath('Startup')) -Force
 | Variable | Defecto | Descripción |
 |----------|---------|-------------|
 | `PORT` | `3000` | Puerto HTTP/WebSocket |
-| `HOST` | `0.0.0.0` | Interfaz de escucha |
+| `HOST` | `127.0.0.1` | Interfaz de escucha. Solo local: el nodo `claude-remote-pc` reenvía ahí. `0.0.0.0` lo abre a la red local (sin contraseña: cualquiera en tu Wi-Fi tendría tu terminal) |
 | `CLAUDE_CMD` | `claude --dangerously-skip-permissions` | Comando a ejecutar en el PTY (sin prompts de permiso) |
 | `SHELL` | `powershell.exe` (Windows) · `bash` (Unix) | Shell que lanza el comando. Los argumentos se eligen según el shell real: PowerShell → `-NoLogo -Command`, cmd → `/c`, POSIX → `-lc` |
 | `PROJECTS_DIRS` | carpeta que contiene el repo | Raíces (separadas por `;`) donde buscar proyectos |
@@ -181,6 +181,6 @@ Cuando Claude termina o queda esperando tu respuesta emite la **campana de termi
 
 ## Seguridad
 
-⚠️ El endpoint da acceso completo a una terminal con tu sesión de Claude. Exponlo **solo** en red local o Tailscale, **nunca** en internet abierto.
+⚠️ El servidor da acceso completo a una terminal con tu sesión de Claude y **no pide contraseña**. Por defecto escucha solo en `127.0.0.1` y se llega únicamente por tu tailnet (`claude-remote-pc`, tráfico cifrado con WireGuard). **Nunca** lo expongas a internet abierto; `HOST=0.0.0.0` solo en una red local de confianza. Si perdés el celular, borrá su equipo en la consola de Tailscale.
 
 ⚠️ Por defecto Claude corre con `--dangerously-skip-permissions` (sin confirmaciones): puede ejecutar acciones sin pedir permiso. Para restaurar los prompts, definí `CLAUDE_CMD=claude`.
