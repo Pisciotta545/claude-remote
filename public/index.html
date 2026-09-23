@@ -50,21 +50,75 @@
   <main id="terminal" class="flex-1 min-h-0 px-1 py-1 hidden"></main>
 
   <!-- Controles de scroll del historial (siempre disponibles en un proyecto) -->
-  <div id="scrollCtrls" class="hidden fixed right-3 bottom-20 z-40 flex flex-col gap-2">
+  <div id="scrollCtrls" class="hidden fixed right-3 bottom-28 z-40 flex flex-col gap-2">
     <button id="scrollUpBtn" title="Subir" class="bg-slate-700/90 active:bg-emerald-600 rounded-full w-10 h-10 text-lg shadow-lg">&#9650;</button>
     <button id="scrollDownBtn" title="Bajar" class="bg-slate-700/90 active:bg-emerald-600 rounded-full w-10 h-10 text-lg shadow-lg">&#9660;</button>
-    <button id="scrollBottomBtn" title="Ir al final" class="hidden bg-emerald-600 active:bg-emerald-500 rounded-full w-10 h-10 text-lg shadow-lg">&#8595;</button>
+    <button id="scrollBottomBtn" title="Ir al final" class="bg-emerald-600 active:bg-emerald-500 rounded-full w-10 h-10 text-lg shadow-lg">&#8595;</button>
   </div>
 
   <!-- Botones rápidos -->
-  <footer id="quickbar" class="hidden bg-slate-800 px-2 py-2 gap-2 shrink-0 overflow-x-auto flex">
-    <button data-cmd="/compact">/compact</button>
-    <button data-cmd="/clear">/clear</button>
-    <button id="usageBtn">📊 Uso</button>
-    <button data-key="esc">Esc</button>
-    <button data-key="tab">Tab</button>
-    <button data-key="ctrlc">Ctrl+C</button>
+  <footer id="quickbar" class="hidden bg-slate-800 px-2 py-1.5 shrink-0 flex flex-col gap-1.5">
+    <!-- Teclas que el teclado del celular no tiene -->
+    <div id="keybar" class="flex gap-1.5 overflow-x-auto">
+      <button data-key="esc">Esc</button>
+      <button data-key="stab" title="Cambiar modo (normal / aceptar ediciones / plan)">⇧Tab</button>
+      <button data-key="up">↑</button>
+      <button data-key="down">↓</button>
+      <button data-key="left">←</button>
+      <button data-key="right">→</button>
+      <button data-key="enter">⏎</button>
+      <button data-key="tab">Tab</button>
+      <button data-key="ctrlc">^C</button>
+      <button id="keysBtn">⌨ Más</button>
+    </div>
+    <!-- Acciones -->
+    <div id="actionbar" class="flex gap-1.5 overflow-x-auto">
+      <button id="cmdBtn">/ Comandos</button>
+      <button id="attachBtn">📎 Adjuntar</button>
+      <button id="copyBtn">📋 Copiar</button>
+      <button id="pasteBtn">📥 Pegar</button>
+      <button id="linksBtn">🔗 Links</button>
+      <button id="usageBtn">📊 Uso</button>
+    </div>
+    <input id="attach-input" type="file" multiple class="hidden" />
   </footer>
+
+  <!-- Menú de comandos "/" (todos los del CLI + los del proyecto/usuario) -->
+  <div id="cmd-modal" class="hidden fixed inset-0 z-50 bg-black/60 flex items-end">
+    <div class="bg-slate-800 w-full rounded-t-2xl p-4 flex flex-col gap-3 h-[80%]">
+      <div class="flex items-center justify-between">
+        <h2 class="text-base font-semibold">Comandos</h2>
+        <button id="cmd-close" class="text-slate-400 text-lg px-2 active:text-white">&#10005;</button>
+      </div>
+      <input id="cmd-search" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"
+        placeholder="Buscar o escribir un comando…"
+        class="w-full bg-slate-900 text-slate-100 text-sm font-mono rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-emerald-600" />
+      <div id="cmd-list" class="flex-1 min-h-0 overflow-y-auto space-y-1"></div>
+    </div>
+  </div>
+
+  <!-- Todas las teclas / atajos del CLI -->
+  <div id="keys-modal" class="hidden fixed inset-0 z-50 bg-black/60 flex items-end">
+    <div class="bg-slate-800 w-full rounded-t-2xl p-4 flex flex-col gap-3 max-h-[80%]">
+      <div class="flex items-center justify-between">
+        <h2 class="text-base font-semibold">Teclas y atajos</h2>
+        <button id="keys-close" class="text-slate-400 text-lg px-2 active:text-white">&#10005;</button>
+      </div>
+      <div id="keys-list" class="grid grid-cols-2 gap-2 overflow-y-auto"></div>
+    </div>
+  </div>
+
+  <!-- Build detectado: ofrecer descargarlo al celular -->
+  <div id="build-modal" class="hidden fixed inset-0 z-[60] bg-black/60 flex items-center justify-center p-6">
+    <div class="bg-slate-800 border border-slate-700 rounded-2xl p-5 w-full max-w-sm shadow-xl">
+      <h2 class="text-base font-semibold mb-1">📦 Build listo</h2>
+      <p class="text-sm text-slate-300 mb-3">¿Querés descargarlo en el celular?</p>
+      <div id="build-list" class="space-y-2 mb-4"></div>
+      <div class="flex justify-end">
+        <button id="build-no" class="px-4 py-2 rounded-lg bg-slate-700 active:bg-slate-600 text-sm">Ahora no</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Panel de uso detallado (botón "Uso") -->
   <div id="usage-modal" class="hidden fixed inset-0 z-50 bg-black/60 flex items-end">
@@ -77,6 +131,30 @@
         <p class="text-sm text-slate-400">Cargando…</p>
       </div>
       <p id="usage-updated" class="text-[11px] text-slate-500"></p>
+    </div>
+  </div>
+
+  <!-- Panel con los links detectados en la pantalla -->
+  <div id="links-modal" class="hidden fixed inset-0 z-50 bg-black/60 flex items-end">
+    <div class="bg-slate-800 w-full rounded-t-2xl p-4 flex flex-col gap-3 max-h-[80%]">
+      <div class="flex items-center justify-between">
+        <h2 class="text-base font-semibold">Links en pantalla</h2>
+        <button id="links-close" class="text-slate-400 text-lg px-2 active:text-white">&#10005;</button>
+      </div>
+      <div id="links-list" class="space-y-2 overflow-y-auto"></div>
+    </div>
+  </div>
+
+  <!-- Panel para pegar/enviar texto a la terminal -->
+  <div id="paste-modal" class="hidden fixed inset-0 z-50 bg-black/60 flex items-end">
+    <div class="bg-slate-800 w-full rounded-t-2xl p-4 flex flex-col gap-3 max-h-[80%]">
+      <div class="flex items-center justify-between">
+        <h2 class="text-base font-semibold">Pegar texto</h2>
+        <button id="paste-close" class="text-slate-400 text-lg px-2 active:text-white">&#10005;</button>
+      </div>
+      <p class="text-[11px] text-slate-400">Revisá o editá el texto y tocá "Enviar" para mandarlo a Claude.</p>
+      <textarea id="paste-text" class="flex-1 min-h-0 w-full bg-slate-900 text-slate-100 text-xs font-mono rounded-lg p-2 resize-none" style="min-height:8rem"></textarea>
+      <button id="paste-send" class="w-full bg-emerald-600 active:bg-emerald-500 rounded-lg py-2 text-sm font-semibold">Enviar</button>
     </div>
   </div>
 
@@ -96,7 +174,7 @@
     // Estilo compartido de los botones de la barra rápida.
     document.querySelectorAll("#quickbar button").forEach((b) =>
       b.classList.add("bg-slate-700", "active:bg-emerald-600", "text-slate-100",
-        "text-sm", "font-mono", "px-3", "py-2", "rounded-lg", "whitespace-nowrap"));
+        "text-sm", "font-mono", "px-3", "py-1.5", "rounded-lg", "whitespace-nowrap", "shrink-0"));
   </script>
   <script src="/app.js"></script>
 </body>

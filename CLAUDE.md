@@ -23,7 +23,7 @@ tray.ps1             Ícono de bandeja (Windows Forms): arranca/reinicia/detiene
 tray.vbs             Lanza tray.ps1 oculto (powershell -STA); se copia a shell:startup para autoarranque
 claude-remote.apk    APK que sirve el autoactualizador (ignorado por git)
 public/index.html    UI móvil + selector de proyectos (Tailwind CDN)
-public/app.js        xterm.js, WebSocket, selector de proyectos, métricas, botones rápidos
+public/app.js        xterm.js, WebSocket, selector de proyectos, métricas, barra de teclas (Esc, ⇧Tab, flechas, ⏎, Tab, ^C) + panel "⌨ Más" (todos los atajos del CLI), menú "/ Comandos" (del CLI + `/api/commands`), adjuntar archivos (`/api/upload` → ruta al prompt), aviso de build (WS `build`), links, copiar y pegar vía puente `CRNative`
 public/manifest.json manifest PWA
 public/sw.js         service worker (instalación PWA)
 public/icon.svg      ícono
@@ -34,15 +34,20 @@ android/             APK nativo (WebView) con selector de proyectos y autoupdate
 
 | Ruta | Función |
 |------|---------|
-| `GET /api/usage` | Uso de tokens (lee credenciales, consulta API OAuth) |
+| `GET /api/usage` | Uso de tokens (lee credenciales, consulta API OAuth). `utilization` es porcentaje 0–100; ante 429 devuelve la última respuesta buena marcada `stale` |
 | `GET /api/projects` | Lista proyectos: subcarpetas de nivel 1 de `PROJECTS_DIRS` (def.: carpeta padre del repo) + anidados con marcador (`.git`, `package.json`, etc., hasta `PROJECTS_DEPTH`=3) + carpetas que Claude ya conoce (lee `cwd` de `~/.claude/projects/*/*.jsonl`, aunque estén en otra unidad). Deduplica por ruta |
 | `GET /api/app-version` | Versión del APK (lee `app-version.json`) |
+| `GET /api/commands?cwd=` | Comandos propios y skills para el menú "/": `.claude/commands/**/*.md` y `.claude/skills/**/SKILL.md` del proyecto y de `~/.claude` (`{cmd,desc,scope}`) |
+| `POST /api/upload?name=` | Body crudo (`application/octet-stream`, máx. 50 MB): guarda el archivo en `UPLOAD_DIR` (def. `%TEMP%/claude-remote-uploads`) y devuelve `{path}` |
+| `GET /api/builds/:id` | Descarga un build detectado (solo ids registrados por el vigilante, nunca rutas arbitrarias) |
 | `GET /download/app.apk` | Sirve `APK_PATH` para el autoupdate |
 | `GET /api/sessions` | Sesiones vivas en segundo plano: `[{path,clients}]` (marca proyectos "en curso" en el selector) |
 | `POST /api/sessions/stop` | Body `{path}`: detiene la sesión de esa carpeta (botón ✕ del selector) |
 | `POST /api/push/register` | Body `{token}`: registra el token FCM del dispositivo (persiste en `push-tokens.json`) |
 | `POST /api/push/unregister` | Body `{token}`: da de baja el token |
-| WS `/ws` | `{type:"start",cwd}` inicia Claude en la carpeta (solo si `cwd` está bajo `PROJECTS_DIRS` o es una carpeta conocida por Claude), luego `input`/`resize`/`stop`. Comando por defecto: `claude --dangerously-skip-permissions` (sin prompts de permiso); override con `CLAUDE_CMD`. **Sesión persistente por carpeta:** el proceso sobrevive a la desconexión del WS y al reconectar se reenvía la pantalla (`{type:"restore"}`); si hay historial, la conversación se reanuda con `--continue` (salvo `{type:"start",cwd,fresh:true}`). Sigue vivo en segundo plano hasta `{type:"stop"}` (botón "Cerrar"); `SESSION_IDLE_MS` (def. 0 = nunca) fuerza apagado por inactividad; buffer acotado a `SESSION_BUFFER_BYTES` (def. 200 KB) |
+| WS `/ws` | `{type:"start",cwd,cols,rows}` inicia Claude en la carpeta (solo si `cwd` está bajo `PROJECTS_DIRS` o es una carpeta conocida por Claude); el PTY arranca con `cols`/`rows` del cliente (def. 80×24) para no descuadrar la pantalla. Luego `input`/`resize`/`stop`. Comando por defecto: `claude --dangerously-skip-permissions` (sin prompts de permiso); override con `CLAUDE_CMD`. **Sesión persistente por carpeta:** el proceso sobrevive a la desconexión del WS y al reconectar se reenvía la pantalla (`{type:"restore"}`); si hay historial, la conversación se reanuda con `--continue` (salvo `{type:"start",cwd,fresh:true}`). Sigue vivo en segundo plano hasta `{type:"stop"}` (botón "Cerrar"); `{type:"build-ack"}` descarta el build pendiente; `SESSION_IDLE_MS` (def. 0 = nunca) fuerza apagado por inactividad; buffer acotado a `SESSION_BUFFER_BYTES` (def. 200 KB) |
+
+**Builds → celular:** cada sesión vigila su carpeta (`fs.watch` recursivo). Si aparece o se reescribe un archivo con extensión de `BUILD_EXTS` (def. `.apk`; `;` separa; vacío = off), ignorando `node_modules`/`intermediates`/`tmp`/`.git`, espera 3 s a que se asiente, deduplica copias idénticas (sha1) y manda WS `{type:"build",builds:[{id,name,rel,size,url}]}` → la app pregunta "¿Descargarlo en el celular?" (APK: `CRNative.installApk` lo baja e instala; sin puente: navegador). Queda pendiente (se reenvía al reconectar) hasta `build-ack`; sin clientes mirando, además manda push "Build listo 📦".
 
 **Push (FCM):** al detectar la campana de terminal (`\x07`) en una sesión **sin clientes conectados** (no la estás mirando), el servidor manda una notificación "Claude te necesita" a los dispositivos registrados (antirrebote 4 s), con `data.path` = carpeta de la sesión. **Al tocar la notificación, la app abre ese proyecto** (`MainActivity` lee el extra `path` → `window.__crOpenProject`). Requiere `firebase-service-account.json` (si falta, el push queda desactivado y el resto funciona igual).
 
@@ -52,7 +57,7 @@ Es un **cliente**: envuelve la web del servidor en un `WebView` y recibe notific
 
 | Archivo | Función |
 |---------|---------|
-| `app/src/main/java/com/claude/remote/MainActivity.java` | Config `IP:puerto`, `WebView`, menú (Cambiar servidor / Buscar actualización), autoupdater, permiso de notificaciones y registro del token FCM |
+| `app/src/main/java/com/claude/remote/MainActivity.java` | Config `IP:puerto`, `WebView`, menú (Cambiar servidor / Buscar actualización), autoupdater, permiso de notificaciones y registro del token FCM. Puente JS `window.CRNative` (`openUrl`/`copy`/`requestPaste`→`window.__crPaste`/`installApk(url,name)`) para abrir links afuera, copiar/pegar con el portapapeles del sistema e instalar builds; `onShowFileChooser` abre el selector del sistema para "Adjuntar"; `shouldOverrideUrlLoading` manda toda navegación ajena al servidor al navegador externo |
 | `app/src/main/java/com/claude/remote/PushService.java` | `FirebaseMessagingService`: muestra la notificación (con el `path` como extra para abrir el proyecto al tocarla) y registra el token en `/api/push/register` |
 | `app/src/main/res/layout/config.xml` | Formulario de dirección del servidor |
 | `app/src/main/res/drawable/ic_launcher.xml` | Ícono de la app (vector): sunburst de Claude (arcilla) sobre tile crema |

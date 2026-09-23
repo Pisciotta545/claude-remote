@@ -2,11 +2,12 @@ import express from "express";
 import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import { spawn } from "node-pty";
-import { readFile, readdir, stat } from "fs/promises";
-import { createReadStream } from "fs";
+import { readFile, readdir, stat, mkdir, writeFile } from "fs/promises";
+import { createReadStream, watch } from "fs";
 import { createInterface } from "readline";
-import { homedir } from "os";
-import { join, dirname, resolve, sep, basename } from "path";
+import { createHash, randomBytes } from "crypto";
+import { homedir, tmpdir } from "os";
+import { join, dirname, resolve, sep, basename, relative } from "path";
 import { fileURLToPath } from "url";
 import { pushEnabled, addToken, removeToken, sendPush } from "./push.js";
 
@@ -48,6 +49,12 @@ const SESSION_BUFFER_BYTES = Math.max(16_384, parseInt(process.env.SESSION_BUFFE
 // celular o cambies de app) hasta que pulses "Cerrar". Poné un valor en ms para
 // forzar un apagado por inactividad.
 const SESSION_IDLE_MS = Math.max(0, parseInt(process.env.SESSION_IDLE_MS || "0", 10));
+// Archivos que se adjuntan desde el celular (imágenes, etc.) para pasárselos a Claude.
+const UPLOAD_DIR = process.env.UPLOAD_DIR || join(tmpdir(), "claude-remote-uploads");
+// Extensiones de build que se ofrecen para descargar al celular cuando aparecen
+// (o se reescriben) dentro de la carpeta de una sesión. Vacío = desactivado.
+const BUILD_EXTS = (process.env.BUILD_EXTS ?? ".apk")
+  .split(";").map((e) => e.trim().toLowerCase()).filter(Boolean);
 
 // Argumentos según el shell REAL, no según el SO (evita mezclar estilos).
 function shellArgs(shell, cmd) {
@@ -152,6 +159,9 @@ async function scanRoots() {
   return out;
 }
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
+// Última respuesta de uso buena, para servirla si Anthropic responde 429 (rate
+// limit) y no dejar el panel en blanco ni con datos que parezcan agotados.
+let usageCache = null; // { payload, at }
 
 const app = express();
 const server = createServer(app);
@@ -196,26 +206,35 @@ app.get("/api/usage", async (_req, res) => {
     });
 
     if (!upstream.ok) {
+      // Rate limit u otro error: reusa el último dato bueno si lo hay (marcado
+      // como "stale") en vez de devolver un error que vacíe/congele el panel.
+      if (usageCache) {
+        return res.json({ ...usageCache.payload, stale: true, cachedAt: usageCache.at });
+      }
       return res
         .status(upstream.status)
         .json({ error: `API respondió ${upstream.status}` });
     }
 
     const data = await upstream.json();
-    // Detecta todas las ventanas de uso (five_hour, seven_day, …) sin descartar el payload.
+    // Solo las ventanas con datos reales (utilization y resets_at presentes);
+    // descarta las vacías/placeholder (nimbus_quill, extra_usage, etc.).
     const windows = {};
     for (const [k, v] of Object.entries(data)) {
-      if (v && typeof v === "object" && ("utilization" in v || "resets_at" in v)) {
-        windows[k] = { utilization: v.utilization ?? null, resets_at: v.resets_at ?? null };
+      if (v && typeof v === "object" && v.utilization != null && v.resets_at != null) {
+        windows[k] = { utilization: v.utilization, resets_at: v.resets_at };
       }
     }
-    res.json({
+    const payload = {
       utilization: data.utilization ?? data.five_hour?.utilization ?? null,
       resets_at: data.resets_at ?? data.five_hour?.resets_at ?? null,
       windows,
       raw: data,
-    });
+    };
+    usageCache = { payload, at: Date.now() };
+    res.json(payload);
   } catch (err) {
+    if (usageCache) return res.json({ ...usageCache.payload, stale: true, cachedAt: usageCache.at });
     res.status(500).json({ error: err.message });
   }
 });
@@ -238,6 +257,85 @@ app.get("/download/app.apk", (_req, res) => {
   res.download(APK_PATH, "claude-remote.apk", (err) => {
     if (err && !res.headersSent) res.status(404).json({ error: "APK no disponible" });
   });
+});
+
+// --- Builds detectados (descarga al celular) --------------------------------
+// Solo se sirven archivos registrados por el vigilante de builds (id aleatorio),
+// nunca una ruta arbitraria del disco.
+const builds = new Map(); // id → { path, name }
+app.get("/api/builds/:id", (req, res) => {
+  const b = builds.get(req.params.id);
+  if (!b) return res.status(404).json({ error: "build no disponible" });
+  res.download(b.path, b.name, (err) => {
+    if (err && !res.headersSent) res.status(404).json({ error: "build no disponible" });
+  });
+});
+
+// --- Adjuntar archivos desde el celular ------------------------------------
+// El cliente manda el archivo crudo (application/octet-stream) y recibe la ruta
+// donde quedó; esa ruta se escribe en el prompt para que Claude lo lea.
+app.post("/api/upload", express.raw({ type: () => true, limit: "50mb" }), async (req, res) => {
+  try {
+    if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: "archivo vacío" });
+    const name = basename(String(req.query.name || "archivo")).replace(/[^\w.\-]+/g, "_").slice(-80) || "archivo";
+    await mkdir(UPLOAD_DIR, { recursive: true });
+    const file = join(UPLOAD_DIR, `${Date.now()}-${name}`);
+    await writeFile(file, req.body);
+    res.json({ path: file });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Comandos personalizados y skills (menú "/" de la app) ------------------
+// Lee name/description del frontmatter de un .md.
+async function mdMeta(file) {
+  try {
+    const head = (await readFile(file, "utf8")).slice(0, 4000);
+    const fm = head.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    const get = (k) => {
+      const m = fm && fm[1].match(new RegExp(`^${k}:\\s*(.*)$`, "m"));
+      return m ? m[1].trim().replace(/^["']|["']$/g, "") : "";
+    };
+    return { name: get("name"), description: get("description") };
+  } catch { return { name: "", description: "" }; }
+}
+
+// Busca archivos que cumplan `test` hasta cierta profundidad.
+async function findFiles(dir, test, depth = 3) {
+  const out = [];
+  let entries;
+  try { entries = await readdir(dir, { withFileTypes: true }); } catch { return out; }
+  for (const e of entries) {
+    const full = join(dir, e.name);
+    if (e.isDirectory() && depth > 1) out.push(...(await findFiles(full, test, depth - 1)));
+    else if (e.isFile() && test(e.name)) out.push(full);
+  }
+  return out;
+}
+
+app.get("/api/commands", async (req, res) => {
+  const cwd = req.query.cwd;
+  const bases = [[join(homedir(), ".claude"), "usuario"]];
+  if (cwd && (await isAllowed(cwd))) bases.unshift([join(cwd, ".claude"), "proyecto"]);
+  const seen = new Set();
+  const commands = [];
+  for (const [base, scope] of bases) {
+    for (const f of await findFiles(join(base, "commands"), (n) => n.endsWith(".md"))) {
+      const name = basename(f, ".md");
+      if (seen.has(name)) continue;
+      seen.add(name);
+      commands.push({ cmd: "/" + name, desc: (await mdMeta(f)).description, scope });
+    }
+    for (const f of await findFiles(join(base, "skills"), (n) => n === "SKILL.md", 4)) {
+      const meta = await mdMeta(f);
+      const name = meta.name || basename(dirname(f));
+      if (seen.has(name)) continue;
+      seen.add(name);
+      commands.push({ cmd: "/" + name, desc: meta.description, scope: `skill · ${scope}` });
+    }
+  }
+  res.json({ commands });
 });
 
 // --- Listado de proyectos --------------------------------------------------
@@ -351,11 +449,89 @@ function maybeNotify(s) {
   });
 }
 
+// --- Vigilante de builds ----------------------------------------------------
+// Observa (recursivo) la carpeta de cada sesión. Cuando aparece o se reescribe
+// un archivo con extensión de BUILD_EXTS, espera a que termine de escribirse y
+// ofrece descargarlo al celular (WS "build" y, si nadie mira, push).
+const BUILD_SETTLE_MS = 3000;
+const BUILD_IGNORE = /[\\/](node_modules|intermediates|tmp|\.git)[\\/]/i;
+const MAX_BUILDS = 30;
+
+function hashFile(file) {
+  return new Promise((res) => {
+    const h = createHash("sha1");
+    createReadStream(file)
+      .on("data", (d) => h.update(d))
+      .on("end", () => res(h.digest("hex")))
+      .on("error", () => res(null));
+  });
+}
+
+function watchBuilds(s) {
+  if (!BUILD_EXTS.length) return;
+  const changed = new Set();
+  let timer = null;
+
+  async function flush() {
+    timer = null;
+    const files = [...changed];
+    changed.clear();
+    const found = new Map(); // hash → build (una sola entrada por copias idénticas)
+    for (const file of files) {
+      let st;
+      try { st = await stat(file); } catch { continue; } // se borró
+      if (!st.isFile() || !st.size) continue;
+      if (Date.now() - st.mtimeMs < 1500) { // todavía se está escribiendo
+        changed.add(file);
+        continue;
+      }
+      const hash = (await hashFile(file)) || file;
+      const rel = relative(s.cwd, file);
+      const prev = found.get(hash);
+      if (prev && prev.rel.length <= rel.length) continue;
+      found.set(hash, { file, rel, size: st.size });
+    }
+    if (changed.size) timer = setTimeout(flush, BUILD_SETTLE_MS);
+    if (found.size && !s.stopping) notifyBuild(s, [...found.values()]);
+  }
+
+  try {
+    s.watcher = watch(s.cwd, { recursive: true }, (_ev, name) => {
+      if (!name) return;
+      const f = String(name);
+      if (!BUILD_EXTS.some((e) => f.toLowerCase().endsWith(e))) return;
+      if (BUILD_IGNORE.test(sep + f)) return;
+      changed.add(join(s.cwd, f));
+      clearTimeout(timer);
+      timer = setTimeout(flush, BUILD_SETTLE_MS);
+    });
+    s.watcher.on("error", () => { /* carpeta borrada o sin permisos: sin avisos */ });
+  } catch { /* sin watch recursivo en esta plataforma */ }
+}
+
+function notifyBuild(s, found) {
+  const list = found.map(({ file, rel, size }) => {
+    const id = randomBytes(8).toString("hex");
+    builds.set(id, { path: file, name: basename(file) });
+    if (builds.size > MAX_BUILDS) builds.delete(builds.keys().next().value);
+    return { id, name: basename(file), rel, size, url: `/api/builds/${id}` };
+  });
+  s.pendingBuild = list; // se reenvía al reconectar hasta que alguien responda
+  broadcast(s, { type: "build", builds: list });
+  if (pushEnabled() && s.clients.size === 0) {
+    sendPush({
+      title: "Build listo 📦",
+      body: `${basename(s.cwd)} · ${list[0].name} — tocá para descargarlo`,
+      data: { path: s.cwd },
+    });
+  }
+}
+
 wss.on("connection", (ws) => {
   let session = null;
   let key = null;
 
-  async function attach(cwd, fresh) {
+  async function attach(cwd, fresh, cols, rows) {
     if (session) return; // este socket ya está adjunto a una sesión
     const dir = (await isAllowed(cwd)) ? cwd : START_DIR;
     key = norm(dir);
@@ -376,8 +552,11 @@ wss.on("connection", (ws) => {
       try {
         pty = spawn(SHELL, shellArgs(SHELL, cmd), {
           name: "xterm-color",
-          cols: 80,
-          rows: 24,
+          // Arranca con el tamaño real del cliente (si lo mandó en el "start"),
+          // así Claude no dibuja primero a 80 cols y luego se reajusta, lo que
+          // dejaba el buffer descuadrado y persistía hasta recargar.
+          cols: cols > 0 ? cols : 80,
+          rows: rows > 0 ? rows : 24,
           cwd: dir,
           env: process.env,
         });
@@ -389,6 +568,7 @@ wss.on("connection", (ws) => {
 
       s = { pty, cwd: dir, buffer: [], bytes: 0, clients: new Set(), killTimer: null };
       sessions.set(key, s);
+      watchBuilds(s);
 
       pty.onData((data) => {
         pushBuffer(s, data);
@@ -398,6 +578,7 @@ wss.on("connection", (ws) => {
 
       pty.onExit(({ exitCode }) => {
         if (s.killTimer) clearTimeout(s.killTimer);
+        try { s.watcher?.close(); } catch { /* ya cerrado */ }
         broadcast(s, { type: "exit", code: exitCode });
         sessions.delete(key);
       });
@@ -411,15 +592,19 @@ wss.on("connection", (ws) => {
     // Re-dibuja en el cliente lo que ya había en pantalla.
     if (s.buffer.length && ws.readyState === ws.OPEN)
       ws.send(JSON.stringify({ type: "restore", data: s.buffer.join("") }));
+    // Build detectado mientras no mirabas: se vuelve a ofrecer hasta que respondas.
+    if (s.pendingBuild && ws.readyState === ws.OPEN)
+      ws.send(JSON.stringify({ type: "build", builds: s.pendingBuild }));
   }
 
   ws.on("message", (msg) => {
     try {
       const { type, data, cols, rows, cwd, fresh } = JSON.parse(msg.toString());
-      if (type === "start") attach(cwd, fresh);
+      if (type === "start") attach(cwd, fresh, cols, rows);
       else if (type === "input" && session?.pty) session.pty.write(data);
       else if (type === "resize" && session?.pty) session.pty.resize(cols, rows);
       else if (type === "stop" && key) stopSession(key); // "Cerrar": detiene el proceso
+      else if (type === "build-ack" && session) session.pendingBuild = null; // ya respondiste
     } catch {
       /* ignora frames malformados */
     }

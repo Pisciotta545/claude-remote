@@ -3,6 +3,9 @@ package com.claude.remote;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -12,6 +15,8 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.webkit.JavascriptInterface;
+import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -37,6 +42,8 @@ public class MainActivity extends Activity {
     private WebView web;
     private SharedPreferences prefs;
     private String pendingPath; // proyecto a abrir al tocar una notificación
+    private ValueCallback<Uri[]> fileCallback; // selector de archivos del botón "Adjuntar"
+    private static final int REQ_FILES = 200;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -93,8 +100,47 @@ public class MainActivity extends Activity {
         s.setDomStorageEnabled(true);
         // Sin WebChromeClient, los diálogos JS (confirm/alert) no funcionan y
         // confirm() devuelve false → el botón "Cerrar" no hacía nada.
-        web.setWebChromeClient(new WebChromeClient());
+        web.setWebChromeClient(new WebChromeClient() {
+            // Sin esto, <input type="file"> ("Adjuntar") no abre nada en el WebView.
+            @Override
+            public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> cb, FileChooserParams params) {
+                if (fileCallback != null) fileCallback.onReceiveValue(null);
+                fileCallback = cb;
+                Intent i = new Intent(Intent.ACTION_GET_CONTENT)
+                    .addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("*/*")
+                    .putExtra(Intent.EXTRA_ALLOW_MULTIPLE,
+                        params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE);
+                try {
+                    startActivityForResult(Intent.createChooser(i, "Adjuntar"), REQ_FILES);
+                } catch (Exception e) {
+                    fileCallback = null;
+                    return false;
+                }
+                return true;
+            }
+        });
+        // Puente nativo para abrir links afuera y copiar/pegar con el portapapeles
+        // del sistema (más fiable que las APIs web sobre HTTP local).
+        web.addJavascriptInterface(new NativeBridge(), "CRNative");
         web.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, android.webkit.WebResourceRequest req) {
+                // Todo lo que no sea el servidor propio (links tocados) va afuera,
+                // así la app no se reemplaza ni expone el puente nativo a otros sitios.
+                Uri target = req.getUrl();
+                Uri base = Uri.parse(baseUrl());
+                String host = target.getHost();
+                if (host != null && host.equalsIgnoreCase(base.getHost())) return false;
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, target)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                } catch (Exception e) {
+                    Toast.makeText(MainActivity.this, "No se pudo abrir el link", Toast.LENGTH_SHORT).show();
+                }
+                return true;
+            }
+
             @Override
             public void onPageFinished(WebView view, String u) {
                 maybeOpenPending(); // abre el proyecto de la notificación si lo hay
@@ -104,6 +150,24 @@ public class MainActivity extends Activity {
         checkUpdate(false);   // chequeo silencioso al abrir
         ensureNotifications(); // permiso de notificaciones (Android 13+)
         registerPush();        // registra el token FCM en el servidor
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_FILES || fileCallback == null) return;
+        Uri[] result = null;
+        if (resultCode == RESULT_OK && data != null) {
+            if (data.getClipData() != null) { // selección múltiple
+                int n = data.getClipData().getItemCount();
+                result = new Uri[n];
+                for (int k = 0; k < n; k++) result[k] = data.getClipData().getItemAt(k).getUri();
+            } else if (data.getData() != null) {
+                result = new Uri[]{data.getData()};
+            }
+        }
+        fileCallback.onReceiveValue(result);
+        fileCallback = null;
     }
 
     // --- Notificaciones push -----------------------------------------------
@@ -202,10 +266,15 @@ public class MainActivity extends Activity {
     }
 
     private void downloadAndInstall(String apkUrl) {
-        Toast.makeText(this, "Descargando actualización…", Toast.LENGTH_SHORT).show();
+        downloadAndInstall(apkUrl, "update.apk", "Descargando actualización…");
+    }
+
+    /** Descarga un APK a la caché y lanza el instalador (actualización o build). */
+    private void downloadAndInstall(String apkUrl, String fileName, String message) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
         new Thread(() -> {
             try {
-                File apk = new File(getExternalCacheDir(), "update.apk");
+                File apk = new File(getExternalCacheDir(), fileName);
                 HttpURLConnection c = (HttpURLConnection) new URL(apkUrl).openConnection();
                 c.setConnectTimeout(15000);
                 c.setReadTimeout(30000);
@@ -237,6 +306,63 @@ public class MainActivity extends Activity {
         i.setDataAndType(uri, "application/vnd.android.package-archive");
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
         startActivity(i);
+    }
+
+    // --- Puente JS ↔ nativo (links + portapapeles) -------------------------
+
+    /** Expuesto al WebView como `window.CRNative`. */
+    private class NativeBridge {
+        /** Abre una URL en el navegador/app del sistema. */
+        @JavascriptInterface
+        public void openUrl(String url) {
+            if (url == null || url.isEmpty()) return;
+            runOnUiThread(() -> {
+                try {
+                    Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(i);
+                } catch (Exception e) {
+                    Toast.makeText(MainActivity.this, "No se pudo abrir el link", Toast.LENGTH_SHORT).show();
+                }
+            });
+        }
+
+        /** Descarga e instala un APK (build detectado en la PC). */
+        @JavascriptInterface
+        public void installApk(String url, String name) {
+            if (url == null || url.isEmpty()) return;
+            String safe = (name == null || name.isEmpty()) ? "build.apk" : name.replaceAll("[^\\w.\\-]", "_");
+            if (!safe.toLowerCase().endsWith(".apk")) safe += ".apk";
+            final String file = safe;
+            runOnUiThread(() -> downloadAndInstall(url, file, "Descargando " + file + "…"));
+        }
+
+        /** Copia texto al portapapeles del sistema. */
+        @JavascriptInterface
+        public void copy(String text) {
+            if (text == null) return;
+            runOnUiThread(() -> {
+                ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("Claude", text));
+            });
+        }
+
+        /** Lee el portapapeles (en el hilo de UI) y lo devuelve por window.__crPaste. */
+        @JavascriptInterface
+        public void requestPaste() {
+            runOnUiThread(() -> {
+                String text = "";
+                ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (cm != null && cm.hasPrimaryClip() && cm.getPrimaryClip().getItemCount() > 0) {
+                    CharSequence t = cm.getPrimaryClip().getItemAt(0).coerceToText(MainActivity.this);
+                    if (t != null) text = t.toString();
+                }
+                if (web != null) {
+                    web.evaluateJavascript(
+                        "window.__crPaste && window.__crPaste(" + JSONObject.quote(text) + ");", null);
+                }
+            });
+        }
     }
 
     private String httpGet(String urlStr) throws Exception {

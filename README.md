@@ -50,6 +50,8 @@ Copy-Item tray.vbs -Destination ([Environment]::GetFolderPath('Startup')) -Force
 | `FIREBASE_SA_PATH` | `firebase-service-account.json` (raíz) | Service account de Firebase para enviar push. Si falta, el push queda desactivado |
 | `PUSH_TOKENS_PATH` | `push-tokens.json` (raíz) | Archivo donde se guardan los tokens FCM de los dispositivos |
 | `APK_PATH` | `claude-remote.apk` (raíz) | Ruta del APK que sirve el autoactualizador |
+| `BUILD_EXTS` | `.apk` | Extensiones (separadas por `;`) que, al generarse en la carpeta de una sesión, se ofrecen para descargar al celular. Vacío = desactivado |
+| `UPLOAD_DIR` | `%TEMP%/claude-remote-uploads` | Dónde se guardan los archivos adjuntados desde el celular |
 
 ## Conexión desde Android (Tailscale)
 
@@ -83,6 +85,18 @@ APK firmado (clave de debug) en `android/app/build/outputs/apk/debug/app-debug.a
 4. Elegí un **proyecto** de la lista; Claude arranca dentro de esa carpeta. Botón **‹ Proyectos** para volver a elegir.
 5. Menú **⋮**: *Cambiar servidor* (nueva IP) · *Buscar actualización*.
 
+### Controles en un proyecto
+
+| Control | Qué hace |
+|---------|----------|
+| Barra de teclas | `Esc`, `⇧Tab` (modo normal/aceptar ediciones/plan), `↑ ↓ ← →`, `⏎`, `Tab`, `^C` |
+| **⌨ Más** | Todos los atajos del CLI: Esc Esc, nueva línea, Ctrl+O/T/B/R/L, Alt+P/T, edición de línea, RePág/AvPág, `!`, `@`, `/` |
+| **/ Comandos** | Buscador con los comandos del CLI + los propios y skills (proyecto y usuario). Los que llevan argumento se escriben sin Enter |
+| **📎 Adjuntar** | Sube fotos/archivos a la PC y escribe su ruta en el prompt para que Claude los lea |
+| **📋 Copiar / 📥 Pegar / 🔗 Links / 📊 Uso** | Portapapeles, URLs de la pantalla y uso del plan |
+
+**Build → celular:** si Claude genera un `.apk` (o lo que diga `BUILD_EXTS`) dentro del proyecto, la app pregunta si querés descargarlo e instalarlo. Si no estás mirando esa sesión llega una notificación; al tocarla se abre el proyecto con la pregunta.
+
 ### Autoactualización
 
 El APK se actualiza solo desde la app, sin navegador:
@@ -99,7 +113,7 @@ Para publicar una versión nueva: subí `versionCode`/`versionName` en `android/
 |------------|---------|---------|
 | Backend | `server.js` | Express, WebSocket (`/ws`), PTY con `claude`, APIs de uso/proyectos/versión |
 | UI | `public/index.html` | Layout móvil + selector de proyectos + panel de control (Tailwind) |
-| Cliente | `public/app.js` | Terminal `xterm.js`, WebSocket, selector de proyectos, métricas, botones rápidos (`/compact`, `/clear`, `/cost`, `Esc`, `Tab`, `Ctrl+C`) |
+| Cliente | `public/app.js` | Terminal `xterm.js`, WebSocket, selector de proyectos, métricas, teclas y comandos del CLI, adjuntos y aviso de builds |
 | PWA | `public/manifest.json`, `public/sw.js`, `public/icon.svg` | Instalación en Android |
 | Android | `android/` | APK WebView con selector de proyectos y autoactualizador |
 
@@ -115,8 +129,11 @@ Para publicar una versión nueva: subí `versionCode`/`versionName` en `android/
 | `POST /api/sessions/stop` | Body `{ path }`: detiene la sesión de esa carpeta |
 | `POST /api/push/register` | Body `{ token }`: registra el token FCM del dispositivo |
 | `POST /api/push/unregister` | Body `{ token }`: da de baja el token |
+| `GET /api/commands?cwd=` | Comandos propios y skills (`.claude/commands`, `.claude/skills`) del proyecto y del usuario |
+| `POST /api/upload?name=` | Sube un archivo (body crudo) a `UPLOAD_DIR` → `{ path }` |
+| `GET /api/builds/:id` | Descarga un build detectado en una sesión |
 
-**WebSocket** (`/ws`): el cliente envía `{ type: "start", cwd }` para iniciar Claude en la carpeta elegida (solo si está bajo `PROJECTS_DIRS` o es una carpeta conocida por Claude), luego `input`/`resize`.
+**WebSocket** (`/ws`): el cliente envía `{ type: "start", cwd }` para iniciar Claude en la carpeta elegida (solo si está bajo `PROJECTS_DIRS` o es una carpeta conocida por Claude), luego `input`/`resize`. El servidor manda `{ type: "build", builds }` al detectar un build; el cliente responde `{ type: "build-ack" }`.
 
 **Memoria y trabajo en segundo plano:** hay una sesión viva por carpeta que **sobrevive a la desconexión** del WebSocket. Al reconectar, el servidor reenvía la pantalla previa (`{ type: "restore" }`) para no perder lo visible. Si la carpeta ya tiene historial de Claude, la conversación se **reanuda con `--continue`** (recuerda todo el contexto anterior); para empezar de cero, mandar `{ type: "start", cwd, fresh: true }`.
 
