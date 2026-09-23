@@ -3,6 +3,9 @@ package com.claude.remote;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -12,9 +15,15 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
+import android.view.Gravity;
 import android.provider.Settings;
 import android.view.Menu;
+import android.view.View;
 import android.view.MenuItem;
+import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -22,9 +31,14 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.core.app.NotificationCompat;
 import androidx.core.content.FileProvider;
 
 import com.google.firebase.messaging.FirebaseMessaging;
@@ -44,15 +58,46 @@ public class MainActivity extends Activity {
     private String pendingPath; // proyecto a abrir al tocar una notificación
     private ValueCallback<Uri[]> fileCallback; // selector de archivos del botón "Adjuntar"
     private static final int REQ_FILES = 200;
+    // Descargas de APK (actualización o build) con notificaciones.
+    private static final String DL_PROGRESS = "descargas";
+    private static final String DL_DONE = "descargas_listas";
+    private static final String EXTRA_INSTALL = "installApk";
+    private boolean resumed; // la app está en pantalla
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("cfg", MODE_PRIVATE);
         if (getIntent() != null) pendingPath = getIntent().getStringExtra("path");
+        TailnetManager.installCrashHandler(this);
+        // Si la última vez se cerró, muestra el porqué. Si fue mientras arrancaba
+        // Tailscale, abre la configuración en vez de reintentar (evita un bucle).
+        boolean tsCrashed = TailnetManager.crashedLastTime(this) && TailnetManager.enabled(this);
+        String report = TailnetManager.crashReport(this);
         String url = prefs.getString("url", null);
-        if (url == null) showConfig();
-        else showWeb(url);
+        if (url == null || tsCrashed) showConfig();
+        else connect();
+        if (report != null) showTextDialog("La app se cerró la última vez", report);
+        installFromExtra(getIntent());
+    }
+
+    /** Abre el servidor: directo (LAN / app Tailscale) o por el Tailscale integrado. */
+    private void connect() {
+        invalidateOptionsMenu(); // muestra/oculta las opciones de Tailscale
+        if (TailnetManager.enabled(this)) showTailnet();
+        else showWeb(prefs.getString("url", ""));
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        resumed = true;
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        resumed = false;
     }
 
     @Override
@@ -63,6 +108,7 @@ public class MainActivity extends Activity {
             pendingPath = intent.getStringExtra("path");
             maybeOpenPending();
         }
+        installFromExtra(intent);
     }
 
     /** Si hay un proyecto pendiente (de una notificación), lo abre en la web. */
@@ -75,9 +121,15 @@ public class MainActivity extends Activity {
     }
 
     private void showConfig() {
+        stopTailnetPolling();
+        web = null;
         setContentView(R.layout.config);
         final EditText input = (EditText) findViewById(R.id.serverUrl);
+        final CheckBox useTailnet = (CheckBox) findViewById(R.id.useTailnet);
+        final EditText authKey = (EditText) findViewById(R.id.authKey);
         input.setText(prefs.getString("url", ""));
+        useTailnet.setChecked(TailnetManager.enabled(this));
+        authKey.setText(prefs.getString("authKey", ""));
         Button save = (Button) findViewById(R.id.saveBtn);
         save.setOnClickListener(v -> {
             String raw = input.getText().toString().trim();
@@ -86,13 +138,210 @@ public class MainActivity extends Activity {
                 return;
             }
             if (!raw.startsWith("http://") && !raw.startsWith("https://")) raw = "http://" + raw;
-            prefs.edit().putString("url", raw).apply();
-            showWeb(raw);
+            boolean wasTailnet = TailnetManager.enabled(this);
+            prefs.edit()
+                .putString("url", raw)
+                .putBoolean("tailnet", useTailnet.isChecked())
+                .putString("authKey", authKey.getText().toString().trim())
+                .apply();
+            // El destino del reenvío se fija al iniciar Tailscale: si ya corría,
+            // hay que reiniciar la app para que tome la dirección nueva.
+            if (wasTailnet && TailnetManager.running()) {
+                Toast.makeText(this, "Reiniciando para aplicar la dirección…", Toast.LENGTH_SHORT).show();
+                restartApp();
+                return;
+            }
+            connect();
         });
     }
 
-    @SuppressWarnings("SetJavaScriptEnabled")
+    private void restartApp() {
+        Intent i = new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        startActivity(i);
+        Runtime.getRuntime().exit(0);
+    }
+
+    // --- Tailscale integrado -------------------------------------------------
+
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private Runnable tailnetPoll;
+    private TextView tsStatus;
+    private Button tsLogin;
+    private String tsAuthUrl;
+    private long tsLoginAskedAt;
+
+    /** Pantalla "Conectando a Tailscale…": inicia el nodo y espera a que esté listo. */
+    private void showTailnet() {
+        web = null;
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setGravity(Gravity.CENTER);
+        box.setPadding(dp(24), dp(24), dp(24), dp(24));
+        box.setBackgroundColor(0xFF0F172A);
+
+        TextView title = new TextView(this);
+        title.setText("Tailscale integrado");
+        title.setTextColor(0xFFE2E8F0);
+        title.setTextSize(22);
+        title.setGravity(Gravity.CENTER);
+        box.addView(title);
+
+        tsStatus = new TextView(this);
+        tsStatus.setText("Iniciando…");
+        tsStatus.setTextColor(0xFF94A3B8);
+        tsStatus.setTextSize(15);
+        tsStatus.setGravity(Gravity.CENTER);
+        tsStatus.setPadding(0, dp(12), 0, dp(20));
+        box.addView(tsStatus);
+
+        tsLogin = new Button(this);
+        tsLogin.setText("Iniciar sesión en Tailscale");
+        tsLogin.setVisibility(View.GONE);
+        tsLogin.setOnClickListener(v -> {
+            if (tsAuthUrl != null) openExternal(tsAuthUrl);
+        });
+        box.addView(tsLogin);
+
+        Button logsBtn = new Button(this);
+        logsBtn.setText("Ver registro");
+        logsBtn.setOnClickListener(v -> showTailnetInfo());
+        box.addView(logsBtn);
+
+        Button cfg = new Button(this);
+        cfg.setText("Cambiar servidor");
+        cfg.setOnClickListener(v -> showConfig());
+        box.addView(cfg);
+
+        setContentView(box);
+
+        new Thread(() -> {
+            try {
+                TailnetManager.start(this);
+            } catch (Throwable t) {
+                TailnetManager.markHealthy(this); // falló con error, no se cerró la app
+                ui.post(() -> tsStatus.setText("No se pudo iniciar Tailscale:\n" + t.getMessage()));
+                return;
+            }
+            ui.post(this::startTailnetPolling);
+            // Si sigue viva 30 s después de arrancar, no hubo cierre al iniciar.
+            ui.postDelayed(() -> TailnetManager.markHealthy(this), 30000);
+        }).start();
+    }
+
+    private void startTailnetPolling() {
+        stopTailnetPolling();
+        tailnetPoll = new Runnable() {
+            @Override
+            public void run() {
+                if (tailnetPoll != this) return;
+                new Thread(() -> {
+                    JSONObject st = TailnetManager.status();
+                    ui.post(() -> onTailnetStatus(st));
+                }).start();
+                ui.postDelayed(this, 1000);
+            }
+        };
+        ui.post(tailnetPoll);
+    }
+
+    private void stopTailnetPolling() {
+        if (tailnetPoll != null) ui.removeCallbacks(tailnetPoll);
+        tailnetPoll = null;
+    }
+
+    private void onTailnetStatus(JSONObject st) {
+        if (tailnetPoll == null || tsStatus == null) return; // ya se salió de la pantalla
+        String state = st.optString("state");
+        tsAuthUrl = st.optString("authURL", "");
+        if (tsAuthUrl.isEmpty()) tsAuthUrl = null;
+        tsLogin.setVisibility(View.GONE);
+        switch (state) {
+            case "Running":
+                stopTailnetPolling();
+                showWeb(TailnetManager.localBase());
+                return;
+            case "NeedsLogin":
+                if (tsAuthUrl != null) {
+                    tsStatus.setText("Iniciá sesión con tu cuenta de Tailscale (la misma de la PC). Después volvé a la app.");
+                    tsLogin.setVisibility(View.VISIBLE);
+                } else {
+                    tsStatus.setText("Pidiendo link de inicio de sesión…");
+                    long now = System.currentTimeMillis();
+                    if (now - tsLoginAskedAt > 15000) {
+                        tsLoginAskedAt = now;
+                        new Thread(() -> { try { TailnetManager.login(); } catch (Throwable ignored) {} }).start();
+                    }
+                }
+                return;
+            case "NeedsMachineAuth":
+                tsStatus.setText("Aprobá este dispositivo en la consola de Tailscale (login.tailscale.com/admin/machines).");
+                return;
+            default:
+                String err = st.optString("error", "");
+                tsStatus.setText("Conectando a tu red Tailscale…" + (err.isEmpty() ? "" : "\n" + err));
+        }
+    }
+
+    /** Estado y registro de Tailscale (diagnóstico), con opción de copiar. */
+    private void showTailnetInfo() {
+        JSONObject st = TailnetManager.status();
+        String info = "Estado: " + st.optString("state") +
+            "\nNombre: " + st.optString("name", "—") +
+            "\nIP: " + st.optString("ip", "—") +
+            "\nServidor: " + prefs.getString("url", "") +
+            "\n\n" + TailnetManager.logs();
+        showTextDialog("Tailscale", info);
+    }
+
+    /** Diálogo con texto largo seleccionable y botón "Copiar" (reportes, registro). */
+    private void showTextDialog(String title, String text) {
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextIsSelectable(true);
+        tv.setTextSize(11);
+        tv.setPadding(dp(16), dp(8), dp(16), dp(8));
+        ScrollView sv = new ScrollView(this);
+        sv.addView(tv);
+        new AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(sv)
+            .setPositiveButton("Copiar", (d, w) -> {
+                ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText(title, text));
+                Toast.makeText(this, "Copiado", Toast.LENGTH_SHORT).show();
+            })
+            .setNegativeButton("Cerrar", null)
+            .show();
+    }
+
+    private void openExternal(String url) {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Exception e) {
+            Toast.makeText(this, "No se pudo abrir el navegador", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private int dp(int v) {
+        return Math.round(v * getResources().getDisplayMetrics().density);
+    }
+
+    /** Con Tailscale integrado, la cookie del reenvío local debe estar antes de cargar. */
     private void showWeb(String url) {
+        if (TailnetManager.enabled(this) && TailnetManager.running()) {
+            CookieManager cm = CookieManager.getInstance();
+            cm.setAcceptCookie(true);
+            cm.setCookie(url, TailnetManager.cookie() + "; path=/", ok -> {
+                cm.flush();
+                loadWeb(url);
+            });
+        } else {
+            loadWeb(url);
+        }
+    }
+
+    @SuppressWarnings("SetJavaScriptEnabled")
+    private void loadWeb(String url) {
         web = new WebView(this);
         setContentView(web);
         WebSettings s = web.getSettings();
@@ -193,6 +442,10 @@ public class MainActivity extends Activity {
     public boolean onCreateOptionsMenu(Menu menu) {
         menu.add(0, 1, 0, "Cambiar servidor");
         menu.add(0, 2, 0, "Buscar actualización");
+        if (TailnetManager.enabled(this)) {
+            menu.add(0, 3, 0, "Tailscale: estado y registro");
+            menu.add(0, 4, 0, "Tailscale: cerrar sesión");
+        }
         return true;
     }
 
@@ -200,6 +453,17 @@ public class MainActivity extends Activity {
     public boolean onOptionsItemSelected(MenuItem item) {
         if (item.getItemId() == 1) {
             showConfig();
+            return true;
+        }
+        if (item.getItemId() == 3) {
+            showTailnetInfo();
+            return true;
+        }
+        if (item.getItemId() == 4) {
+            new Thread(() -> {
+                try { TailnetManager.logout(); } catch (Throwable ignored) {}
+                runOnUiThread(this::showTailnet); // muestra el botón de login de nuevo
+            }).start();
             return true;
         }
         if (item.getItemId() == 2) {
@@ -229,6 +493,8 @@ public class MainActivity extends Activity {
     // --- Autoactualización -------------------------------------------------
 
     private String baseUrl() {
+        // Con Tailscale integrado todo pasa por el reenvío local.
+        if (TailnetManager.enabled(this)) return TailnetManager.running() ? TailnetManager.localBase() : "";
         String u = prefs.getString("url", "");
         while (u.endsWith("/")) u = u.substring(0, u.length() - 1);
         return u;
@@ -266,30 +532,117 @@ public class MainActivity extends Activity {
     }
 
     private void downloadAndInstall(String apkUrl) {
-        downloadAndInstall(apkUrl, "update.apk", "Descargando actualización…");
+        downloadAndInstall(apkUrl, "update.apk", "Actualización de Claude Remote");
     }
 
-    /** Descarga un APK a la caché y lanza el instalador (actualización o build). */
-    private void downloadAndInstall(String apkUrl, String fileName, String message) {
-        Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+    /**
+     * Descarga un APK a la caché (actualización o build) mostrando notificaciones
+     * de inicio, progreso y fin. Tocar la de fin abre el instalador; si la app está
+     * en pantalla, el instalador se abre solo.
+     */
+    private void downloadAndInstall(String apkUrl, String fileName, String title) {
+        Toast.makeText(this, "Descargando " + title + "…", Toast.LENGTH_SHORT).show();
+        final int id = 1000 + (fileName.hashCode() & 0xffff);
+        final NotificationManager nm = downloadChannels();
         new Thread(() -> {
+            NotificationCompat.Builder b = new NotificationCompat.Builder(this, DL_PROGRESS)
+                .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setContentTitle(title)
+                .setContentText("Iniciando descarga…")
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setProgress(0, 0, true);
+            nm.notify(id, b.build());
             try {
                 File apk = new File(getExternalCacheDir(), fileName);
-                HttpURLConnection c = (HttpURLConnection) new URL(apkUrl).openConnection();
+                HttpURLConnection c = TailnetManager.open(this, apkUrl);
                 c.setConnectTimeout(15000);
                 c.setReadTimeout(30000);
+                long total = c.getContentLengthLong(), done = 0, lastAt = 0;
                 try (InputStream in = c.getInputStream(); FileOutputStream out = new FileOutputStream(apk)) {
                     byte[] buf = new byte[8192];
                     int n;
-                    while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+                    while ((n = in.read(buf)) != -1) {
+                        out.write(buf, 0, n);
+                        done += n;
+                        long now = SystemClock.uptimeMillis();
+                        if (now - lastAt < 400) continue; // no saturar el sistema de notificaciones
+                        lastAt = now;
+                        if (total > 0) {
+                            int pct = (int) (done * 100 / total);
+                            b.setProgress(100, pct, false).setContentText(pct + "% · " + mb(done) + " de " + mb(total));
+                        } else {
+                            b.setContentText(mb(done) + " descargados");
+                        }
+                        nm.notify(id, b.build());
+                    }
                 }
                 c.disconnect();
-                runOnUiThread(() -> install(apk));
+                nm.notify(id, new NotificationCompat.Builder(this, DL_DONE)
+                    .setSmallIcon(R.drawable.ic_notification)
+                    .setContentTitle("Descarga completa · " + title)
+                    .setContentText("Tocá para instalar (" + mb(apk.length()) + ")")
+                    .setAutoCancel(true)
+                    .setPriority(NotificationCompat.PRIORITY_HIGH)
+                    .setContentIntent(installIntent(apk, id))
+                    .build());
+                runOnUiThread(() -> { if (resumed) install(apk); });
             } catch (Exception e) {
+                nm.notify(id, new NotificationCompat.Builder(this, DL_DONE)
+                    .setSmallIcon(android.R.drawable.stat_notify_error)
+                    .setContentTitle("Error al descargar · " + title)
+                    .setContentText(String.valueOf(e.getMessage()))
+                    .setAutoCancel(true)
+                    .build());
                 runOnUiThread(() ->
                     Toast.makeText(this, "Error al descargar: " + e.getMessage(), Toast.LENGTH_LONG).show());
             }
         }).start();
+    }
+
+    private static String mb(long bytes) {
+        return String.format(java.util.Locale.US, "%.1f MB", bytes / 1048576.0);
+    }
+
+    /** Canales: progreso (silencioso) y fin de descarga (con aviso). */
+    private NotificationManager downloadChannels() {
+        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            nm.createNotificationChannel(
+                new NotificationChannel(DL_PROGRESS, "Progreso de descargas", NotificationManager.IMPORTANCE_LOW));
+            nm.createNotificationChannel(
+                new NotificationChannel(DL_DONE, "Descargas completas", NotificationManager.IMPORTANCE_HIGH));
+        }
+        return nm;
+    }
+
+    /**
+     * Qué abre la notificación de fin: el instalador directo si ya hay permiso para
+     * instalar; si no, la app (que pide el permiso y después instala).
+     */
+    private PendingIntent installIntent(File apk, int requestCode) {
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || getPackageManager().canRequestPackageInstalls()) {
+            Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", apk);
+            Intent i = new Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            return PendingIntent.getActivity(this, requestCode, i, flags);
+        }
+        Intent open = new Intent(this, MainActivity.class)
+            .putExtra(EXTRA_INSTALL, apk.getName())
+            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        return PendingIntent.getActivity(this, requestCode, open, flags);
+    }
+
+    /** Instala un APK ya descargado en la caché (desde la notificación de fin). */
+    private void installFromExtra(Intent intent) {
+        String name = intent == null ? null : intent.getStringExtra(EXTRA_INSTALL);
+        if (name == null) return;
+        intent.removeExtra(EXTRA_INSTALL);
+        File apk = new File(getExternalCacheDir(), new File(name).getName()); // solo archivos de la caché
+        if (apk.exists()) install(apk);
+        else Toast.makeText(this, "El archivo ya no está, volvé a descargarlo", Toast.LENGTH_LONG).show();
     }
 
     private void install(File apk) {
@@ -334,7 +687,7 @@ public class MainActivity extends Activity {
             String safe = (name == null || name.isEmpty()) ? "build.apk" : name.replaceAll("[^\\w.\\-]", "_");
             if (!safe.toLowerCase().endsWith(".apk")) safe += ".apk";
             final String file = safe;
-            runOnUiThread(() -> downloadAndInstall(url, file, "Descargando " + file + "…"));
+            runOnUiThread(() -> downloadAndInstall(url, file, file));
         }
 
         /** Copia texto al portapapeles del sistema. */
@@ -366,7 +719,7 @@ public class MainActivity extends Activity {
     }
 
     private String httpGet(String urlStr) throws Exception {
-        HttpURLConnection c = (HttpURLConnection) new URL(urlStr).openConnection();
+        HttpURLConnection c = TailnetManager.open(this, urlStr);
         c.setConnectTimeout(10000);
         c.setReadTimeout(10000);
         try (InputStream in = c.getInputStream()) {

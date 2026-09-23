@@ -33,6 +33,34 @@
         android:inputType="textUri"
         android:paddingBottom="16dp" />
 
+    <CheckBox
+        android:id="@+id/useTailnet"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Tailscale integrado (sin la app de Tailscale)"
+        android:textColor="#e2e8f0"
+        android:buttonTint="#10b981"
+        android:paddingTop="8dp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Con Tailscale integrado podés usar el nombre de la PC (MagicDNS), p. ej. mi-pc:3000"
+        android:textColor="#64748b"
+        android:textSize="12sp"
+        android:paddingBottom="8dp" />
+
+    <EditText
+        android:id="@+id/authKey"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Clave tskey-auth-… (opcional; si no, login en el navegador)"
+        android:textColorHint="#64748b"
+        android:textColor="#e2e8f0"
+        android:textSize="13sp"
+        android:inputType="textVisiblePassword"
+        android:paddingBottom="16dp" />
+
     <Button
         android:id="@+id/saveBtn"
         android:layout_width="match_parent"

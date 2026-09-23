@@ -11,8 +11,8 @@ android {
         applicationId "com.claude.remote"
         minSdk 24
         targetSdk 35
-        versionCode 9
-        versionName "1.8"
+        versionCode 12
+        versionName "2.1"
     }
 
     buildFeatures {
@@ -25,6 +25,11 @@ android {
         }
     }
 
+    // La librería de Tailscale (~20 MB) va comprimida: el APK baja mucho más liviano.
+    packagingOptions {
+        jniLibs { useLegacyPackaging true }
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
@@ -33,6 +38,8 @@ android {
 
 dependencies {
     implementation 'androidx.core:core:1.13.1'
+    // Tailscale integrado (tsnet): se genera con android/tailnet/build.ps1
+    implementation files('libs/tailnet.aar')
     implementation platform('com.google.firebase:firebase-bom:33.7.0')
     implementation 'com.google.firebase:firebase-messaging'
 }

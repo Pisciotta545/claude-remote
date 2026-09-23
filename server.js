@@ -2,6 +2,7 @@ import express from "express";
 import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import { spawn } from "node-pty";
+import { spawn as spawnChild } from "child_process";
 import { readFile, readdir, stat, mkdir, writeFile } from "fs/promises";
 import { createReadStream, watch } from "fs";
 import { createInterface } from "readline";
@@ -55,6 +56,11 @@ const UPLOAD_DIR = process.env.UPLOAD_DIR || join(tmpdir(), "claude-remote-uploa
 // (o se reescriben) dentro de la carpeta de una sesión. Vacío = desactivado.
 const BUILD_EXTS = (process.env.BUILD_EXTS ?? ".apk")
   .split(";").map((e) => e.trim().toLowerCase()).filter(Boolean);
+// Tailscale integrado de la PC (tailnet-host/): pone este servidor en la tailnet
+// sin la app de Tailscale. Se lanza solo si existe el binario; TAILNET=0 lo apaga.
+const TAILNET_BIN = process.env.TAILNET_BIN ||
+  join(__dirname, process.platform === "win32" ? "claude-remote-ts.exe" : "claude-remote-ts");
+const TAILNET_STATUS = process.env.TAILNET_STATUS || "127.0.0.1:3099";
 
 // Argumentos según el shell REAL, no según el SO (evita mezclar estilos).
 function shellArgs(shell, cmd) {
@@ -336,6 +342,41 @@ app.get("/api/commands", async (req, res) => {
     }
   }
   res.json({ commands });
+});
+
+// --- Tailscale integrado de la PC -------------------------------------------
+// Estado del nodo ({state, authURL, ip, name}) o null si no corre.
+async function tailnetStatus() {
+  try {
+    const r = await fetch(`http://${TAILNET_STATUS}/status`, { signal: AbortSignal.timeout(3000) });
+    return r.ok ? await r.json() : null;
+  } catch { return null; }
+}
+
+// Lo mantiene corriendo. Si ya hay uno (p. ej. lanzado a mano) no lanza otro;
+// con -watch-stdin se cierra solo cuando este proceso termina.
+let tailnetChild = null;
+let tailnetAuthLogged = "";
+async function superviseTailnet() {
+  if (process.env.TAILNET === "0") return;
+  try { await stat(TAILNET_BIN); } catch { return; } // no compilado: nada que hacer
+  const st = await tailnetStatus();
+  if (st?.state === "NeedsLogin" && st.authURL && st.authURL !== tailnetAuthLogged) {
+    tailnetAuthLogged = st.authURL;
+    console.log(`Tailscale integrado: iniciá sesión en ${st.authURL}`);
+  }
+  if (st || tailnetChild) return;
+  tailnetChild = spawnChild(TAILNET_BIN, [
+    "-watch-stdin", "-port", String(PORT), "-target", `127.0.0.1:${PORT}`,
+    "-status", TAILNET_STATUS, "-dir", join(__dirname, "tailscale-state"),
+    "-logfile", join(__dirname, "tailscale-state", "tailnet.log"),
+  ], { stdio: ["pipe", "inherit", "inherit"], windowsHide: true });
+  tailnetChild.on("exit", () => { tailnetChild = null; });
+  tailnetChild.on("error", (err) => { console.error("[tailnet]", err.message); tailnetChild = null; });
+}
+
+app.get("/api/tailnet", async (_req, res) => {
+  res.json((await tailnetStatus()) || { state: "off" });
 });
 
 // --- Listado de proyectos --------------------------------------------------
@@ -625,6 +666,9 @@ wss.on("connection", (ws) => {
     session = null;
   });
 });
+
+superviseTailnet();
+setInterval(superviseTailnet, 15000);
 
 server.listen(PORT, HOST, () => {
   console.log(`Claude Remote → http://${HOST}:${PORT}`);

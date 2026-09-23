@@ -52,6 +52,20 @@ Copy-Item tray.vbs -Destination ([Environment]::GetFolderPath('Startup')) -Force
 | `APK_PATH` | `claude-remote.apk` (raíz) | Ruta del APK que sirve el autoactualizador |
 | `BUILD_EXTS` | `.apk` | Extensiones (separadas por `;`) que, al generarse en la carpeta de una sesión, se ofrecen para descargar al celular. Vacío = desactivado |
 | `UPLOAD_DIR` | `%TEMP%/claude-remote-uploads` | Dónde se guardan los archivos adjuntados desde el celular |
+| `TAILNET` | (activo) | `0` = no lanzar el Tailscale integrado de la PC |
+| `TAILNET_BIN` | `claude-remote-ts.exe` (raíz) | Binario del Tailscale integrado de la PC |
+| `TAILNET_STATUS` | `127.0.0.1:3099` | Dirección local del estado de ese nodo |
+| `TAILNET_HOSTNAME` | `claude-remote-pc` | Nombre de la PC en la tailnet (lo lee el binario) |
+
+### Tailscale integrado en la PC (sin la app de Tailscale)
+
+`claude-remote-ts.exe` mete este servidor en tu tailnet como el equipo **`claude-remote-pc`** ([tsnet](https://tailscale.com/docs/features/tsnet), sin VPN). `server.js` lo arranca y lo cierra solo.
+
+1. Compilarlo una vez (requiere Go): `powershell tailnet-host/build.ps1`.
+2. Al arrancar el servidor, la consola (o `GET /api/tailnet`) muestra un link **login.tailscale.com/a/…**: abrilo (desde cualquier dispositivo) y entrá con tu cuenta.
+3. En la app del celular usá `claude-remote-pc:3000` (o su IP `100.x`). Con eso ya podés desinstalar la app de Tailscale de la PC.
+
+Recomendado: en la consola de Tailscale, **desactivar el vencimiento de clave** de `claude-remote-pc`.
 
 ## Conexión desde Android (Tailscale)
 
@@ -68,7 +82,11 @@ Alternativa a la PWA: un APK nativo (`android/`) que envuelve la web en un `WebV
 
 ### Compilar
 
-Requiere SDK de Android (`ANDROID_HOME`) + JDK 17.
+Requiere SDK de Android (`ANDROID_HOME`, con NDK) + JDK 17. Antes de la primera compilación hay que generar el Tailscale integrado (Go + [gomobile](https://pkg.go.dev/golang.org/x/mobile/cmd/gomobile)):
+
+```powershell
+powershell android/tailnet/build.ps1   # → android/app/libs/tailnet.aar
+```
 
 ```bash
 cd android
@@ -97,13 +115,23 @@ APK firmado (clave de debug) en `android/app/build/outputs/apk/debug/app-debug.a
 
 **Build → celular:** si Claude genera un `.apk` (o lo que diga `BUILD_EXTS`) dentro del proyecto, la app pregunta si querés descargarlo e instalarlo. Si no estás mirando esa sesión llega una notificación; al tocarla se abre el proyecto con la pregunta.
 
+### Tailscale integrado (sin la app de Tailscale)
+
+La app trae Tailscale adentro ([tsnet](https://tailscale.com/docs/features/tsnet), en espacio de usuario: no usa VPN), así que el celular **no necesita la app de Tailscale**.
+
+1. En la configuración, activá **Tailscale integrado** y poné la dirección de la PC en la tailnet: IP `100.x.y.z:3000` o nombre MagicDNS (`mi-pc:3000`).
+2. La primera vez tocá **Iniciar sesión en Tailscale** y entrá con la misma cuenta que la PC (o pegá una clave `tskey-auth-…` en la configuración). El celular aparece como `claude-remote-<modelo>` en tu tailnet.
+3. Queda recordado. Si todo anda, ya podés desinstalar la app de Tailscale.
+
+Menú **⋮**: *Tailscale: estado y registro* (diagnóstico, se puede copiar) · *cerrar sesión*. Si la app se cierra, al reabrirla muestra el motivo (botón **Copiar**) y, si fue al arrancar Tailscale, abre la configuración en vez de reintentar. Recomendado: en la consola de Tailscale, **desactivar el vencimiento de clave** de ese dispositivo (si no, pide login de nuevo cada ~180 días).
+
 ### Autoactualización
 
 El APK se actualiza solo desde la app, sin navegador:
 
 1. Al abrir (o desde **⋮ → Buscar actualización**) consulta `GET /api/app-version`.
 2. Si el `versionCode` del servidor supera al instalado, ofrece descargar e instalar.
-3. Descarga `GET /download/app.apk` y lanza el instalador de Android vía `FileProvider`.
+3. Descarga `GET /download/app.apk` con notificaciones de inicio, progreso y fin; tocar la de fin abre el instalador de Android (vía `FileProvider`). Si la app está en pantalla, el instalador se abre solo. Igual para los builds descargados.
 
 Para publicar una versión nueva: subí `versionCode`/`versionName` en `android/app/build.gradle` **y** en `app-version.json`, recompilá y copiá el APK a `claude-remote.apk` (lo que sirve el servidor).
 

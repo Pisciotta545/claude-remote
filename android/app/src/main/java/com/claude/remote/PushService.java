@@ -70,12 +70,15 @@ public class PushService extends FirebaseMessagingService {
     static void sendTokenToServer(Context ctx, String token) {
         SharedPreferences prefs = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE);
         String base = prefs.getString("url", "");
+        // Con Tailscale integrado solo se llega por el reenvío local (si ya corre;
+        // si no, MainActivity lo registra al conectar).
+        if (TailnetManager.enabled(ctx)) base = TailnetManager.running() ? TailnetManager.localBase() : "";
         if (base == null || base.isEmpty() || token == null) return;
         while (base.endsWith("/")) base = base.substring(0, base.length() - 1);
         final String url = base + "/api/push/register";
         new Thread(() -> {
             try {
-                HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+                HttpURLConnection c = TailnetManager.open(ctx, url);
                 c.setRequestMethod("POST");
                 c.setConnectTimeout(10000);
                 c.setReadTimeout(10000);
