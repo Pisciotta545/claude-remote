@@ -1,12 +1,14 @@
 {
   "name": "claude-remote",
   "version": "1.0.0",
+  "productName": "ClaudeRemoteServer",
   "description": "Control remoto de Claude CLI desde Android vía Web/PWA (red local o Tailscale)",
   "type": "module",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "pair": "node pair.js"
   },
   "engines": {
     "node": ">=18"

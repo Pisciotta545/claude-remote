@@ -96,14 +96,20 @@ final class TailnetManager {
     }
 
     /**
-     * Abre una conexión HTTP al servidor. Con Tailscale integrado agrega la cookie
-     * del reenvío local (las URLs ya apuntan a 127.0.0.1).
+     * Abre una conexión HTTP al servidor. Manda la clave de la app (el servidor
+     * rechaza lo que no la traiga) y, con Tailscale integrado, la cookie del
+     * reenvío local (las URLs ya apuntan a 127.0.0.1).
      */
     static HttpURLConnection open(Context ctx, String url) throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        String key = prefs(ctx).getString(APP_KEY, null);
+        if (key != null) c.setRequestProperty("X-CR-Key", key);
         if (enabled(ctx) && url.startsWith("http://127.0.0.1:")) c.setRequestProperty("Cookie", cookie());
         return c;
     }
+
+    /** Preferencia con la clave que da el servidor al vincular (POST /api/pair). */
+    static final String APP_KEY = "appKey";
 
     // --- Diagnóstico de cierres ---------------------------------------------
 

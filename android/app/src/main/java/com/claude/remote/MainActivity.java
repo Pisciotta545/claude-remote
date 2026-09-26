@@ -67,6 +67,7 @@ public class MainActivity extends Activity {
     private static final String EXTRA_INSTALL = "installApk";
     private boolean resumed; // la app está en pantalla
     private AppLock lock;    // bloqueo con huella/PIN del celular
+    private long lastAuthRetry; // freno para re-verificar la clave ante un 401
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -339,18 +340,105 @@ public class MainActivity extends Activity {
         return Math.round(v * getResources().getDisplayMetrics().density);
     }
 
-    /** Con Tailscale integrado, la cookie del reenvío local debe estar antes de cargar. */
+    // --- Vinculación con la PC ------------------------------------------------
+    // El servidor solo acepta pedidos con la clave de la app. Se obtiene una vez
+    // con un código de 6 dígitos que se genera en la PC (bandeja → "Vincular celular").
+
+    private static String trimSlash(String u) {
+        while (u.endsWith("/")) u = u.substring(0, u.length() - 1);
+        return u;
+    }
+
+    /** Verifica la clave (GET /api/auth) y carga la web, o pide vincular si falta. */
     private void showWeb(String url) {
-        if (TailnetManager.enabled(this) && TailnetManager.running()) {
-            CookieManager cm = CookieManager.getInstance();
-            cm.setAcceptCookie(true);
-            cm.setCookie(url, TailnetManager.cookie() + "; path=/", ok -> {
-                cm.flush();
-                loadWeb(url);
+        new Thread(() -> {
+            int code;
+            try {
+                HttpURLConnection c = TailnetManager.open(this, trimSlash(url) + "/api/auth");
+                c.setConnectTimeout(10000);
+                c.setReadTimeout(10000);
+                code = c.getResponseCode();
+                c.disconnect();
+            } catch (Exception e) {
+                code = -1; // sin conexión: la web muestra el error como siempre
+            }
+            final int st = code;
+            runOnUiThread(() -> {
+                if (st == 401) showPair(url);
+                else setCookiesAndLoad(url);
             });
-        } else {
-            loadWeb(url);
+        }).start();
+    }
+
+    /** Cookies antes de cargar: la del reenvío local (Tailscale integrado) y la clave. */
+    private void setCookiesAndLoad(String url) {
+        CookieManager cm = CookieManager.getInstance();
+        cm.setAcceptCookie(true);
+        if (TailnetManager.enabled(this) && TailnetManager.running()) {
+            cm.setCookie(url, TailnetManager.cookie() + "; path=/");
         }
+        String key = prefs.getString(TailnetManager.APP_KEY, null);
+        cm.setCookie(url, "cr_key=" + (key != null ? key : "") + "; path=/", ok -> {
+            cm.flush();
+            loadWeb(url);
+        });
+    }
+
+    private void showPair(String url) {
+        final EditText code = new EditText(this);
+        code.setInputType(InputType.TYPE_CLASS_NUMBER);
+        code.setHint("123456");
+        code.setTextSize(24);
+        code.setGravity(Gravity.CENTER);
+        LinearLayout box = new LinearLayout(this);
+        box.setPadding(dp(24), dp(8), dp(24), 0);
+        box.addView(code, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT));
+        new AlertDialog.Builder(this)
+            .setTitle("Vincular con la PC")
+            .setMessage("Por seguridad, el servidor solo acepta esta app vinculada.\n\n" +
+                "En la PC: clic derecho en el ícono de Claude Remote (junto al reloj) → " +
+                "«Vincular celular», e ingresá el código de 6 dígitos.")
+            .setView(box)
+            .setCancelable(false)
+            .setPositiveButton("Vincular", (d, w) -> pair(url, code.getText().toString().trim()))
+            .setNeutralButton("Cambiar servidor", (d, w) -> showConfig())
+            .setNegativeButton("Reintentar", (d, w) -> showWeb(url))
+            .show();
+    }
+
+    /** POST /api/pair {code}: si el código es válido, el servidor devuelve la clave. */
+    private void pair(String url, String code) {
+        new Thread(() -> {
+            String err = null;
+            try {
+                HttpURLConnection c = TailnetManager.open(this, trimSlash(url) + "/api/pair");
+                c.setRequestMethod("POST");
+                c.setConnectTimeout(10000);
+                c.setReadTimeout(10000);
+                c.setDoOutput(true);
+                c.setRequestProperty("Content-Type", "application/json");
+                JSONObject body = new JSONObject().put("code", code).put("name", Build.MANUFACTURER + " " + Build.MODEL);
+                c.getOutputStream().write(body.toString().getBytes("UTF-8"));
+                int st = c.getResponseCode();
+                JSONObject res = new JSONObject(readAll(st < 400 ? c.getInputStream() : c.getErrorStream()));
+                c.disconnect();
+                if (st == 200) prefs.edit().putString(TailnetManager.APP_KEY, res.getString("key")).apply();
+                else err = res.optString("error", "Error " + st);
+            } catch (Exception e) {
+                err = "No se pudo vincular: " + e.getMessage();
+            }
+            final String fe = err;
+            runOnUiThread(() -> {
+                if (fe != null) {
+                    Toast.makeText(this, fe, Toast.LENGTH_LONG).show();
+                    showPair(url);
+                } else {
+                    Toast.makeText(this, "Vinculada ✓", Toast.LENGTH_SHORT).show();
+                    showWeb(url);
+                }
+            });
+        }).start();
     }
 
     /**
@@ -424,6 +512,18 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String u) {
                 maybeOpenPending(); // abre el proyecto de la notificación si lo hay
+            }
+
+            // 401 = la clave ya no sirve (p. ej. se borró app-key.txt en la PC):
+            // vuelve a verificar y pide vincular. Con freno para no entrar en bucle.
+            @Override
+            public void onReceivedHttpError(WebView view, android.webkit.WebResourceRequest req,
+                                            android.webkit.WebResourceResponse resp) {
+                if (!req.isForMainFrame() || resp.getStatusCode() != 401) return;
+                long now = SystemClock.elapsedRealtime();
+                if (now - lastAuthRetry < 15000) return;
+                lastAuthRetry = now;
+                showWeb(url);
             }
         });
         web.loadUrl(url);
@@ -772,14 +872,21 @@ public class MainActivity extends Activity {
         HttpURLConnection c = TailnetManager.open(this, urlStr);
         c.setConnectTimeout(10000);
         c.setReadTimeout(10000);
-        try (InputStream in = c.getInputStream()) {
-            StringBuilder sb = new StringBuilder();
-            byte[] buf = new byte[4096];
-            int n;
-            while ((n = in.read(buf)) != -1) sb.append(new String(buf, 0, n, "UTF-8"));
-            return sb.toString();
+        try {
+            return readAll(c.getInputStream());
         } finally {
             c.disconnect();
+        }
+    }
+
+    private static String readAll(InputStream in) throws Exception {
+        if (in == null) return "{}";
+        try (InputStream s = in) {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = s.read(buf)) != -1) out.write(buf, 0, n);
+            return out.toString("UTF-8");
         }
     }
 }

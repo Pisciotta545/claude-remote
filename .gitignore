@@ -26,3 +26,11 @@ android/app/libs/
 # Tailscale integrado de la PC (tailnet-host/build.ps1) y su estado (login)
 claude-remote-ts.exe
 tailscale-state/
+
+# Clave de la app y vinculación en curso (security.js)
+app-key.txt
+pairing.json
+
+# Instalador del servidor (installer/build.ps1)
+installer/stage/
+installer/Output/

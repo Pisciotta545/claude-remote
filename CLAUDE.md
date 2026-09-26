@@ -16,11 +16,14 @@ PWA + backend Node.js para controlar Claude CLI desde Android (red local / Tails
 ```
 server.js            Express + WS (/ws) + PTY + APIs usage/projects/app-version/files + /download/app.apk
 package.json         Dependencias: express, node-pty, ws
+security.js          Guard de Express/WS: Host permitido (IP, localhost, claude-remote-pc[.*.ts.net], `ALLOWED_HOSTS`) → Origin del mismo sitio → clave de la app (`X-CR-Key` o cookie `cr_key` = `app-key.txt`, creada una vez; borrarla desvincula todo). `APP_ONLY=0` desactiva la clave. Vinculación: `pairing.json` {code,expires} (6 dígitos, 5 min, un uso, 5 intentos)
+pair.js              `npm run pair` / tray "Vincular celular": genera el código (`--quiet` = solo el código)
 push.js              Notificaciones push (FCM HTTP v1) sin deps: firma el JWT con crypto nativo; store de tokens
 firebase-service-account.json  Credencial para ENVIAR push (ignorada por git; sin ella el push queda desactivado)
 app-version.json     versionCode/versionName del APK servido (autoupdate)
-tray.ps1             Ícono de bandeja (Windows Forms): arranca/reinicia/detiene y supervisa el servidor (oculto)
-tray.vbs             Lanza tray.ps1 oculto (powershell -STA); se copia a shell:startup para autoarranque
+tray.ps1             Ícono de bandeja (Windows Forms): arranca/reinicia/detiene y supervisa el servidor (oculto; Node = `node\node.exe` propio o el del PATH; solo mata servidores de su carpeta); vincular celular, dirección de la tailnet, aviso/login de Tailscale (sondea `TAILNET_STATUS` cada 15 s) y aviso si falta Claude Code
+tray.vbs             Lanza tray.ps1 oculto (powershell -STA) desde su propia carpeta; autoarranque = acceso directo en shell:startup
+installer/           Instalador del servidor (Inno Setup 6): build.ps1 arma stage/ (lista blanca: sin secretos ni estado; Node portable, deps sin prebuilds ajenos, claude-remote-ts.exe, APK) → Output/<productName>-v<version>.exe; ClaudeRemoteServer.iss: por usuario en %LOCALAPPDATA%\Programs\ClaudeRemote, autoarranque opcional, cierra el tray/servidor de {app} al actualizar/desinstalar, avisa si falta Claude Code
 claude-remote.apk    APK que sirve el autoactualizador (ignorado por git)
 tailnet-host/        Tailscale integrado de la PC (Go + tsnet) → claude-remote-ts.exe (build.ps1); estado/login en tailscale-state/ (ambos ignorados por git)
 public/index.html    UI móvil + selector de proyectos (Tailwind CDN)
@@ -37,7 +40,9 @@ android/tailnet/     Tailscale integrado (Go + tsnet → tailnet.aar vía gomobi
 | Ruta | Función |
 |------|---------|
 | `GET /api/usage` | Uso de tokens (lee credenciales, consulta API OAuth). `utilization` es porcentaje 0–100; ante 429 devuelve la última respuesta buena marcada `stale` |
-| `GET /api/projects` | Lista proyectos: subcarpetas de nivel 1 de `PROJECTS_DIRS` (def.: carpeta padre del repo) + anidados con marcador (`.git`, `package.json`, etc., hasta `PROJECTS_DEPTH`=3) + carpetas que Claude ya conoce (lee `cwd` de `~/.claude/projects/*/*.jsonl`, aunque estén en otra unidad). Deduplica por ruta |
+| `GET /api/projects` | Lista proyectos: subcarpetas de nivel 1 de `PROJECTS_DIRS` (def.: carpeta padre del repo si hay `.git`; instalado: ninguna) + anidados con marcador (`.git`, `package.json`, etc., hasta `PROJECTS_DEPTH`=3) + carpetas que Claude ya conoce (`listKnownProjectPaths`: confiables en `~/.claude.json` `projects[ruta].hasTrustDialogAccepted` + `cwd` de `~/.claude/projects/*/*.jsonl`, aunque estén en otra unidad). Deduplica por ruta |
+| `POST /api/pair` | Body `{code,name}`: si el código de `pairing.json` es válido devuelve `{key}` (la app la guarda y manda como cookie `cr_key`). Sin clave, igual que `/api/app-version` y `/download/app.apk` |
+| `GET /api/auth` | `{ok:true}` si la clave es válida (401 si no: la app pide vincular) |
 | `GET /api/app-version` | Versión del APK (lee `app-version.json`) |
 | `GET /api/commands?cwd=` | Comandos propios y skills para el menú "/": `.claude/commands/**/*.md` y `.claude/skills/**/SKILL.md` del proyecto y de `~/.claude` (`{cmd,desc,scope}`) |
 | `POST /api/upload?name=` | Body crudo (`application/octet-stream`, máx. 50 MB): guarda el archivo en `UPLOAD_DIR` (def. `%TEMP%/claude-remote-uploads`) y devuelve `{path}` |
@@ -51,11 +56,11 @@ android/tailnet/     Tailscale integrado (Go + tsnet → tailnet.aar vía gomobi
 | `POST /api/sessions/stop` | Body `{path}`: detiene la sesión de esa carpeta (botón ✕ del selector) |
 | `POST /api/push/register` | Body `{token}`: registra el token FCM del dispositivo (persiste en `push-tokens.json`) |
 | `POST /api/push/unregister` | Body `{token}`: da de baja el token |
-| WS `/ws` | `{type:"start",cwd,cols,rows}` inicia Claude en la carpeta (solo si `cwd` está bajo `PROJECTS_DIRS` o es una carpeta conocida por Claude); el PTY arranca con `cols`/`rows` del cliente (def. 80×24) para no descuadrar la pantalla. Luego `input`/`resize`/`stop`. Comando por defecto: `claude --dangerously-skip-permissions` (sin prompts de permiso); override con `CLAUDE_CMD`. **Sesión persistente por carpeta:** el proceso sobrevive a la desconexión del WS y al reconectar se reenvía la pantalla (`{type:"restore"}`); si hay historial, la conversación se reanuda con `--continue` (salvo `{type:"start",cwd,fresh:true}`). Sigue vivo en segundo plano hasta `{type:"stop"}` (botón "Cerrar"); `{type:"build-ack"}` descarta el build pendiente; `SESSION_IDLE_MS` (def. 0 = nunca) fuerza apagado por inactividad; buffer acotado a `SESSION_BUFFER_BYTES` (def. 200 KB) |
+| WS `/ws` | `{type:"start",cwd,cols,rows}` inicia Claude en la carpeta (solo si `cwd` está bajo `PROJECTS_DIRS` o es una carpeta conocida por Claude); el PTY arranca con `cols`/`rows` del cliente (def. 80×24) para no descuadrar la pantalla. Luego `input`/`resize`/`stop`. Comando por defecto: `claude --dangerously-skip-permissions` (sin prompts de permiso); override con `CLAUDE_CMD`. El PTY recibe el entorno sin las marcas de sesión de Claude (`ptyEnv`: `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, …, más `NO_COLOR`/`GIT_TERMINAL_PROMPT` del shell de Claude Code): si el servidor se lanzó desde Claude Code, las heredaría y cada sesión quedaría como subsesión sin guardar la conversación y sin colores. **Sesión persistente por carpeta:** el proceso sobrevive a la desconexión del WS y al reconectar se reenvía la pantalla (`{type:"restore"}`); si hay historial, la conversación se reanuda con `--continue` (salvo `{type:"start",cwd,fresh:true}`). Sigue vivo en segundo plano hasta `{type:"stop"}` (botón "Cerrar"); `{type:"build-ack"}` descarta el build pendiente; `SESSION_IDLE_MS` (def. 0 = nunca) fuerza apagado por inactividad; buffer acotado a `SESSION_BUFFER_BYTES` (def. 200 KB) |
 
 **Builds → celular:** cada sesión vigila su carpeta (`fs.watch` recursivo). Si aparece o se reescribe un archivo con extensión de `BUILD_EXTS` (def. `.apk`; `;` separa; vacío = off), ignorando `node_modules`/`intermediates`/`tmp`/`.git`, espera 3 s a que se asiente, deduplica copias idénticas (sha1) y manda WS `{type:"build",builds:[{id,name,rel,size,url}]}` → la app pregunta "¿Descargarlo en el celular?" (APK: `CRNative.installApk` lo baja e instala; sin puente: navegador). Queda pendiente (se reenvía al reconectar) hasta `build-ack`; sin clientes mirando, además manda push "Build listo 📦".
 
-**Red:** el servidor escucha solo en `127.0.0.1` (`HOST`); desde afuera se entra únicamente por la tailnet vía `claude-remote-pc`. No tiene contraseña: no abrirlo a la LAN (`HOST=0.0.0.0`) salvo red confiable.
+**Red:** el servidor escucha solo en `127.0.0.1` (`HOST`); desde afuera se entra únicamente por la tailnet vía `claude-remote-pc`. Todo pedido (HTTP y WS) pasa por `security.js`: sin la clave de la app vinculada → 401 (también navegadores de la PC). No abrirlo a la LAN (`HOST=0.0.0.0`) salvo red confiable.
 
 **Tailscale integrado de la PC:** si existe `claude-remote-ts.exe` (y `TAILNET≠0`), `server.js` lo lanza con `-watch-stdin` (muere con el servidor) y lo re-chequea cada 15 s. El nodo `claude-remote-pc` escucha `:PORT` en la tailnet y reenvía a `127.0.0.1:PORT`, sin la app de Tailscale. Su estado vive en `127.0.0.1:3099/status` (`?peers=1` agrega los equipos de la tailnet: online, relay, tráfico; registro detallado en `tailscale-state/tailnet.log`, con cada conexión entrante) (`TAILNET_STATUS`), que además es candado de instancia única: si ya corre uno (p. ej. lanzado a mano) no se lanza otro. El link de login se imprime en la consola del servidor y en `/api/tailnet`.
 
@@ -96,4 +101,5 @@ Requiere SDK de Android (`ANDROID_HOME`, con NDK) + JDK 17, `app/google-services
 | Desarrollo | `npm run dev` |
 | Compilar Tailscale integrado (celular) | `powershell android/tailnet/build.ps1` → `android/app/libs/tailnet.aar` (solo al cambiar `tailnet.go`) |
 | Compilar Tailscale integrado (PC) | `powershell tailnet-host/build.ps1` → `claude-remote-ts.exe` |
+| Compilar instalador del servidor | `powershell installer/build.ps1` → `installer/Output/ClaudeRemoteServer-v<version>.exe` (nombre/versión de `package.json` `productName`/`version`) |
 | Compilar APK | `cd android && ./gradlew.bat assembleDebug` → `app/build/outputs/apk/debug/ClaudeRemote-v<versión>.apk` |

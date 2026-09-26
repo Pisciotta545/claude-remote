@@ -4,13 +4,14 @@ import { WebSocketServer } from "ws";
 import { spawn } from "node-pty";
 import { spawn as spawnChild } from "child_process";
 import { readFile, readdir, stat, mkdir, writeFile } from "fs/promises";
-import { createReadStream, watch } from "fs";
+import { createReadStream, watch, existsSync } from "fs";
 import { createInterface } from "readline";
 import { createHash, randomBytes } from "crypto";
 import { homedir, tmpdir } from "os";
 import { join, dirname, resolve, sep, basename, relative, isAbsolute } from "path";
 import { fileURLToPath } from "url";
 import { pushEnabled, addToken, removeToken, sendPush } from "./push.js";
+import { guard, wsAllowed, pairHandler, APP_ONLY } from "./security.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
@@ -20,15 +21,19 @@ const HOST = process.env.HOST || "127.0.0.1";
 const SHELL = process.env.SHELL || (process.platform === "win32" ? "powershell.exe" : "bash");
 const CLAUDE_CMD = process.env.CLAUDE_CMD || "claude --dangerously-skip-permissions";
 const START_DIR = process.env.CLAUDE_CWD || homedir();
-// Raíces donde buscar proyectos (por defecto, la carpeta que contiene este repo).
-const PROJECTS_ROOTS = (process.env.PROJECTS_DIRS || dirname(__dirname))
+// Raíces donde buscar proyectos. Por defecto, la carpeta que contiene este repo
+// si se corre desde un clon de git; instalado (sin .git) no hay raíces: solo se
+// listan las carpetas que Claude ya conoce (ver listKnownProjectPaths).
+const PROJECTS_ROOTS = (process.env.PROJECTS_DIRS ?? (existsSync(join(__dirname, ".git")) ? dirname(__dirname) : ""))
   .split(";")
   .map((s) => s.trim())
   .filter(Boolean)
   .map((s) => resolve(s));
 const CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
-// Carpetas donde ya usaste Claude (le "diste permiso"); su ruta real vive en las sesiones.
+// Carpetas donde ya usaste Claude (le "diste permiso"): su ruta real vive en las
+// sesiones y en ~/.claude.json (las que aceptaste en "¿Confiás en esta carpeta?").
 const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
+const CLAUDE_CONFIG_PATH = join(homedir(), ".claude.json");
 // Profundidad máxima al buscar proyectos anidados dentro de las raíces.
 const MAX_DEPTH = Math.max(1, parseInt(process.env.PROJECTS_DEPTH || "3", 10));
 // Un subdirectorio con alguno de estos archivos se considera un proyecto en sí.
@@ -74,6 +79,16 @@ function shellArgs(shell, cmd) {
   return ["-lc", cmd]; // bash/zsh/sh y demás POSIX
 }
 
+// Entorno del PTY sin las marcas de "sesión de Claude" que se heredan si el
+// servidor se lanzó desde dentro de Claude Code: con ellas, cada claude de la
+// app se cree subsesión y no guarda la conversación ("Transcript saving is off").
+// También las que Claude Code pone en su shell: NO_COLOR=1 dejaba la terminal de
+// la app sin colores (sin el resaltado de tus mensajes).
+const CLAUDE_SESSION_VARS = /^(CLAUDECODE|CLAUDE_PID|CLAUDE_CODE_(CHILD_SESSION|SESSION_ID|SESSION_ATTENDED|ENTRYPOINT|MESSAGING_\w+|SSE_PORT)|NO_COLOR|GIT_TERMINAL_PROMPT)$/;
+function ptyEnv() {
+  return Object.fromEntries(Object.entries(process.env).filter(([k]) => !CLAUDE_SESSION_VARS.test(k)));
+}
+
 // Normaliza rutas para comparar sin sorpresas de mayúsculas (Windows).
 const norm = (p) => resolve(p).toLowerCase();
 
@@ -114,11 +129,19 @@ function firstCwd(jsonlPath) {
   });
 }
 
+// Carpetas marcadas como confiables en ~/.claude.json (`projects[ruta].hasTrustDialogAccepted`).
+async function trustedProjectPaths() {
+  try {
+    const projects = JSON.parse(await readFile(CLAUDE_CONFIG_PATH, "utf8")).projects || {};
+    return Object.entries(projects).filter(([, v]) => v?.hasTrustDialogAccepted).map(([k]) => resolve(k));
+  } catch { return []; }
+}
+
 // Rutas reales de todas las carpetas donde ya se usó Claude, con caché corto.
 let _knownCache = { at: 0, paths: [] };
 async function listKnownProjectPaths() {
   if (Date.now() - _knownCache.at < 10_000) return _knownCache.paths;
-  const out = [];
+  const out = await trustedProjectPaths();
   let dirs;
   try {
     dirs = await readdir(CLAUDE_PROJECTS_DIR, { withFileTypes: true });
@@ -185,7 +208,11 @@ server.on("error", (err) => {
   if (err.code === "EADDRINUSE") process.exit(1); // el supervisor reintenta
 });
 
+// Seguridad (security.js): Host/Origin propios y clave de la app en cada pedido.
+app.use(guard);
 app.use(express.json());
+app.post("/api/pair", pairHandler); // vinculación de la app con el código de la PC
+app.get("/api/auth", (_req, res) => res.json({ ok: true })); // la app verifica su clave
 // Sin caché para la app: el WebView de Android reusaba HTML/JS viejo tras
 // actualizar. Con no-store siempre baja la última versión.
 app.use(express.static(join(__dirname, "public"), {
@@ -491,7 +518,7 @@ app.get("/api/projects", async (_req, res) => {
 });
 
 // --- Terminal PTY vía WebSocket -------------------------------------------
-const wss = new WebSocketServer({ server, path: "/ws" });
+const wss = new WebSocketServer({ server, path: "/ws", verifyClient: ({ req }) => wsAllowed(req) });
 
 // Sesiones vivas, una por carpeta (clave = ruta normalizada). Sobreviven a la
 // desconexión del WebSocket para que reconectar no reinicie la conversación.
@@ -669,7 +696,7 @@ wss.on("connection", (ws) => {
           cols: cols > 0 ? cols : 80,
           rows: rows > 0 ? rows : 24,
           cwd: dir,
-          env: process.env,
+          env: ptyEnv(),
         });
       } catch (err) {
         if (ws.readyState === ws.OPEN)
@@ -743,4 +770,5 @@ setInterval(superviseTailnet, 15000);
 server.listen(PORT, HOST, () => {
   console.log(`Claude Remote → http://${HOST}:${PORT}`);
   console.log(`Push FCM: ${pushEnabled() ? "activo" : "desactivado (falta firebase-service-account.json)"}`);
+  console.log(`Acceso: ${APP_ONLY ? "solo la app vinculada (npm run pair genera el código)" : "SIN clave (APP_ONLY=0)"}`);
 });

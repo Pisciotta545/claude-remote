@@ -2,6 +2,17 @@
 
 PWA para controlar **Claude CLI** desde un celular Android vía navegador, en red local o mediante **Tailscale**. Terminal en tiempo real (`xterm.js` + `node-pty` sobre WebSocket) y panel de consumo de tokens.
 
+## Instalar en otra PC (instalador)
+
+Para usarlo en otra PC sin clonar el repo: descargar `ClaudeRemoteServer-v<versión>.exe` del release de GitHub y ejecutarlo (no pide admin; trae Node, Tailscale integrado y el APK del autoupdate).
+
+1. Antes: instalar [Claude Code](https://docs.anthropic.com/en/docs/claude-code/setup), iniciar sesión y abrir con `claude` las carpetas que se quieran usar (aceptar "¿Confiás en esta carpeta?"). La app lista **esas carpetas** (`~/.claude.json` + sesiones).
+2. Al terminar queda un punto verde en la bandeja: clic derecho → *Iniciar sesión en Tailscale…* (cuenta propia).
+3. Instalar la app en el celular; como dirección, la de *Dirección para la app* del menú (se copia con un clic).
+4. Menú → *Vincular celular…* y escribir el código en la app.
+
+Se instala en `%LOCALAPPDATA%\Programs\ClaudeRemote` con acceso en el menú Inicio y (opcional) autoarranque. Push no funciona en otra PC (el APK está atado a este proyecto de Firebase). Compilar el instalador: `powershell installer/build.ps1` (requiere Inno Setup 6).
+
 ## Requisitos
 
 - Node.js ≥ 18
@@ -25,24 +36,28 @@ Servidor por defecto en `http://127.0.0.1:3000` (solo local: desde el celular se
 
 ### Autoarranque oculto con Windows
 
-`tray.vbs` lanza `tray.ps1` sin ventana: el servidor queda **oculto** (solo visible en el Administrador de tareas) y se controla desde un **punto en la bandeja** (verde = corriendo, gris = detenido). Menú de clic derecho: *Abrir en el navegador · Detener/Arrancar · Reiniciar · Salir* (doble clic abre el navegador). El tray arranca el servidor, lo **supervisa** (lo relanza si se cae) y te deja pararlo o reiniciarlo a mano. Para que arranque al iniciar sesión:
+`tray.vbs` lanza `tray.ps1` sin ventana: el servidor queda **oculto** (solo visible en el Administrador de tareas) y se controla desde un **punto en la bandeja** (verde = corriendo, gris = detenido). Menú de clic derecho: *Vincular celular · Dirección para la app (copia `IP:puerto` de la tailnet) · Iniciar sesión en Tailscale (solo si falta) · Falta Claude Code (solo si no está) · Detener/Arrancar · Reiniciar · Salir* (doble clic = vincular). Avisa con una notificación si falta el login de Tailscale o Claude Code. El tray arranca el servidor, lo **supervisa** (lo relanza si se cae) y te deja pararlo o reiniciarlo a mano. Para que arranque al iniciar sesión:
 
 ```powershell
-Copy-Item tray.vbs -Destination ([Environment]::GetFolderPath('Startup')) -Force
+$s = (New-Object -ComObject WScript.Shell).CreateShortcut("$([Environment]::GetFolderPath('Startup'))\Claude Remote.lnk")
+$s.TargetPath = "wscript.exe"; $s.Arguments = "`"$PWD\tray.vbs`""; $s.Save()
 ```
 
-- **Desactivar:** borrar `tray.vbs` de `shell:startup` (o *Salir* desde el menú).
-- Detecta Node por el `PATH`; si no está, usa `C:\Program Files\nodejs\node.exe`.
+- Es un **acceso directo**: `tray.vbs` usa la carpeta donde está (una copia suelta en `shell:startup` no encontraría `tray.ps1`).
+- **Desactivar:** borrar el acceso de `shell:startup` (o *Salir* desde el menú).
+- Node: `node\node.exe` junto al tray (instalador), si no el del `PATH`, si no `C:\Program Files\nodejs\node.exe`.
 
 ### Variables de entorno
 
 | Variable | Defecto | Descripción |
 |----------|---------|-------------|
 | `PORT` | `3000` | Puerto HTTP/WebSocket |
-| `HOST` | `127.0.0.1` | Interfaz de escucha. Solo local: el nodo `claude-remote-pc` reenvía ahí. `0.0.0.0` lo abre a la red local (sin contraseña: cualquiera en tu Wi-Fi tendría tu terminal) |
+| `HOST` | `127.0.0.1` | Interfaz de escucha. Solo local: el nodo `claude-remote-pc` reenvía ahí. `0.0.0.0` lo abre a la red local |
+| `APP_ONLY` | (activo) | `0` = acepta pedidos sin la clave de la app vinculada (p. ej. probar desde el navegador de la PC). Afecta también a lo que llega por Tailscale |
+| `ALLOWED_HOSTS` | — | Nombres de host extra aceptados (separados por `;`); por defecto IPs, `localhost` y `claude-remote-pc` |
 | `CLAUDE_CMD` | `claude --dangerously-skip-permissions` | Comando a ejecutar en el PTY (sin prompts de permiso) |
 | `SHELL` | `powershell.exe` (Windows) · `bash` (Unix) | Shell que lanza el comando. Los argumentos se eligen según el shell real: PowerShell → `-NoLogo -Command`, cmd → `/c`, POSIX → `-lc` |
-| `PROJECTS_DIRS` | carpeta que contiene el repo | Raíces (separadas por `;`) donde buscar proyectos |
+| `PROJECTS_DIRS` | carpeta que contiene el repo (si hay `.git`); instalado: ninguna | Raíces (separadas por `;`) donde buscar proyectos. Sin raíces se listan solo las carpetas que Claude ya conoce |
 | `PROJECTS_DEPTH` | `3` | Profundidad máxima al buscar proyectos anidados dentro de las raíces |
 | `CLAUDE_CWD` | home del usuario | Carpeta por defecto si no se elige proyecto |
 | `SESSION_IDLE_MS` | `0` (nunca) | Ms que sobrevive la sesión sin clientes conectados. `0` = sigue en segundo plano hasta pulsar "Cerrar" |
@@ -153,7 +168,7 @@ Para publicar una versión nueva: subí `versionCode`/`versionName` en `android/
 | Endpoint | Función |
 |----------|---------|
 | `GET /api/usage` | Lee `~/.claude/.credentials.json`, consulta la API de uso y devuelve `{ utilization, resets_at, raw }` |
-| `GET /api/projects` | Lista `{ projects: [{ name, path }] }`: subcarpetas de nivel 1 de `PROJECTS_DIRS` + proyectos anidados con marcador (`.git`, `package.json`, etc., hasta `PROJECTS_DEPTH`) + carpetas ya conocidas por Claude (leídas de `~/.claude/projects/*/*.jsonl`). Deduplica por ruta |
+| `GET /api/projects` | Lista `{ projects: [{ name, path }] }`: subcarpetas de nivel 1 de `PROJECTS_DIRS` + proyectos anidados con marcador (`.git`, `package.json`, etc., hasta `PROJECTS_DEPTH`) + carpetas ya conocidas por Claude (confiables en `~/.claude.json` y `cwd` de `~/.claude/projects/*/*.jsonl`). Deduplica por ruta |
 | `GET /api/app-version` | Versión del APK servido → `{ versionCode, versionName, url }` |
 | `GET /download/app.apk` | Descarga el APK (`APK_PATH`) para el autoactualizador |
 | `GET /api/sessions` | Sesiones vivas en segundo plano → `{ sessions: [{ path, clients }] }` |
@@ -184,6 +199,6 @@ Cuando Claude termina o queda esperando tu respuesta emite la **campana de termi
 
 ## Seguridad
 
-⚠️ El servidor da acceso completo a una terminal con tu sesión de Claude y **no pide contraseña**. Por defecto escucha solo en `127.0.0.1` y se llega únicamente por tu tailnet (`claude-remote-pc`, tráfico cifrado con WireGuard). **Nunca** lo expongas a internet abierto; `HOST=0.0.0.0` solo en una red local de confianza. Si perdés el celular, borrá su equipo en la consola de Tailscale.
+⚠️ El servidor da acceso completo a una terminal con tu sesión de Claude. Solo acepta la **app vinculada**: la primera vez la app pide un código de 6 dígitos que se genera en la PC (bandeja → *Vincular celular…* o `npm run pair`; vale 5 minutos, un uso, 5 intentos) y recibe una clave que manda en cada pedido. Un navegador (aunque sea en la PC) recibe 401. Borrar `app-key.txt` desvincula todos los celulares. Además escucha solo en `127.0.0.1` y se llega únicamente por tu tailnet (`claude-remote-pc`, tráfico cifrado con WireGuard). **Nunca** lo expongas a internet abierto; `HOST=0.0.0.0` solo en una red local de confianza. Si perdés el celular, borrá su equipo en la consola de Tailscale.
 
 ⚠️ Por defecto Claude corre con `--dangerously-skip-permissions` (sin confirmaciones): puede ejecutar acciones sin pedir permiso. Para restaurar los prompts, definí `CLAUDE_CMD=claude`.
