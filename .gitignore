@@ -34,3 +34,19 @@ pairing.json
 # Instalador del servidor (installer/build.ps1)
 installer/stage/
 installer/Output/
+
+# Clave limitada (solo enviar push) que va en el instalador, nunca al repo
+push-sender.json
+
+# Puerto propio de la PC (server.js) y APKs bajados de GitHub (autoupdate)
+config.json
+updates/
+
+# Firma de producción del APK (android/app/build.gradle)
+android/keystore.properties
+*.jks
+*.keystore
+installer/release/
+
+# Celulares vinculados (security.js)
+devices.json

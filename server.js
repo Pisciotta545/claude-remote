@@ -3,18 +3,47 @@ import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import { spawn } from "node-pty";
 import { spawn as spawnChild } from "child_process";
-import { readFile, readdir, stat, mkdir, writeFile } from "fs/promises";
-import { createReadStream, watch, existsSync } from "fs";
+import { readFile, readdir, stat, mkdir, writeFile, rename, realpath } from "fs/promises";
+import { createReadStream, createWriteStream, watch, existsSync, readFileSync, writeFileSync } from "fs";
+import { createServer as createNetServer } from "net";
+import { Readable } from "stream";
+import { pipeline } from "stream/promises";
 import { createInterface } from "readline";
 import { createHash, randomBytes } from "crypto";
 import { homedir, tmpdir } from "os";
 import { join, dirname, resolve, sep, basename, relative, isAbsolute } from "path";
 import { fileURLToPath } from "url";
-import { pushEnabled, addToken, removeToken, sendPush } from "./push.js";
-import { guard, wsAllowed, pairHandler, APP_ONLY } from "./security.js";
+import { pushEnabled, pushCredential, addToken, removeToken, sendPush } from "./push.js";
+import { guard, wsAllowed, pairHandler, deviceActive, APP_ONLY } from "./security.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const PORT = process.env.PORT || 3000;
+// Puerto propio de cada PC: PORT > config.json > 3000 en un clon de git (el
+// celular del autor ya apunta ahí) > uno libre al azar (20000–29999) la primera
+// vez en una instalación, guardado en config.json. Así no choca con el 3000 de
+// otros proyectos. El estado del Tailscale integrado usa PORT+99.
+const CONFIG_PATH = join(__dirname, "config.json");
+function readConfig() {
+  try { return JSON.parse(readFileSync(CONFIG_PATH, "utf8")); } catch { return {}; }
+}
+const portFree = (port) => new Promise((res) => {
+  const s = createNetServer().once("error", () => res(false));
+  s.once("listening", () => s.close(() => res(true))).listen(port, "127.0.0.1");
+});
+async function choosePort() {
+  if (process.env.PORT) return Number(process.env.PORT);
+  const cfg = readConfig();
+  if (cfg.port) return Number(cfg.port);
+  if (existsSync(join(__dirname, ".git"))) return 3000;
+  for (let i = 0; i < 50; i++) {
+    const p = 20000 + Math.floor(Math.random() * 10000);
+    if ((await portFree(p)) && (await portFree(p + 99))) {
+      writeFileSync(CONFIG_PATH, JSON.stringify({ ...cfg, port: p }, null, 2) + "\n");
+      return p;
+    }
+  }
+  return 3000;
+}
+const PORT = await choosePort();
 // Solo local por defecto: desde afuera se entra por el nodo de Tailscale
 // (claude-remote-ts), que reenvía a 127.0.0.1. HOST=0.0.0.0 abre la red local.
 const HOST = process.env.HOST || "127.0.0.1";
@@ -69,7 +98,12 @@ const BUILD_EXTS = (process.env.BUILD_EXTS ?? ".apk")
 // sin la app de Tailscale. Se lanza solo si existe el binario; TAILNET=0 lo apaga.
 const TAILNET_BIN = process.env.TAILNET_BIN ||
   join(__dirname, process.platform === "win32" ? "claude-remote-ts.exe" : "claude-remote-ts");
-const TAILNET_STATUS = process.env.TAILNET_STATUS || "127.0.0.1:3099";
+const TAILNET_STATUS = process.env.TAILNET_STATUS || `127.0.0.1:${PORT + 99}`;
+// Repo de GitHub cuyas releases se ofrecen para descargar desde la app y de
+// donde sale la actualización de la app (APP_UPDATES=local: solo el APK local).
+const RELEASES_REPO = process.env.RELEASES_REPO || "Pisciotta545/claude-remote";
+const APP_UPDATES_GITHUB = process.env.APP_UPDATES !== "local";
+const UPDATES_DIR = join(__dirname, "updates");
 
 // Argumentos según el shell REAL, no según el SO (evita mezclar estilos).
 function shellArgs(shell, cmd) {
@@ -203,9 +237,13 @@ const server = createServer(app);
 // no debe tumbar el proceso. Se registra y se sigue sirviendo.
 process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
 process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", err));
+// Puerto ocupado: sale con 98 para que el tray avise y no lo relance en bucle.
 server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(`El puerto ${PORT} está ocupado por otro programa (tray → "Cambiar puerto…").`);
+    process.exit(98);
+  }
   console.error("[http error]", err);
-  if (err.code === "EADDRINUSE") process.exit(1); // el supervisor reintenta
 });
 
 // Seguridad (security.js): Host/Origin propios y clave de la app en cada pedido.
@@ -215,9 +253,28 @@ app.post("/api/pair", pairHandler); // vinculación de la app con el código de 
 app.get("/api/auth", (_req, res) => res.json({ ok: true })); // la app verifica su clave
 // Sin caché para la app: el WebView de Android reusaba HTML/JS viejo tras
 // actualizar. Con no-store siempre baja la última versión.
+// Solo corre código servido por esta PC (sin CDNs): aunque un tercero inyectara
+// un <script> externo, el WebView no lo ejecuta ni puede mandar datos afuera.
+const CSP = [
+  "default-src 'self'", "script-src 'self'", "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:", "font-src 'self' data:", "connect-src 'self'",
+  "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'", "form-action 'self'",
+].join("; ");
+app.use((_req, res, next) => {
+  if (!res.getHeader("Content-Security-Policy")) res.setHeader("Content-Security-Policy", CSP);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  next();
+});
 app.use(express.static(join(__dirname, "public"), {
   setHeaders: (res) => res.setHeader("Cache-Control", "no-store"),
 }));
+// Librerías de la web desde node_modules (versiones fijas en package-lock).
+for (const [route, dir] of [
+  ["/vendor/xterm", "node_modules/@xterm/xterm"],
+  ["/vendor/addon-fit", "node_modules/@xterm/addon-fit/lib"],
+  ["/vendor/codemirror", "node_modules/codemirror"],
+]) app.use(route, express.static(join(__dirname, dir), { maxAge: "7d" }));
 
 // --- Métricas de uso -------------------------------------------------------
 async function readAccessToken() {
@@ -277,20 +334,126 @@ app.get("/api/usage", async (_req, res) => {
 });
 
 // --- Autoactualización del APK ---------------------------------------------
-app.get("/api/app-version", async (_req, res) => {
+// --- Releases de GitHub -----------------------------------------------------
+// Caché de 10 min: sin token, la API de GitHub permite 60 consultas por hora;
+// ante un error se usa la última lista buena (`stale`).
+let ghCache = { at: 0, list: null };
+async function githubReleases() {
+  if (ghCache.list && Date.now() - ghCache.at < 600_000) return { list: ghCache.list, stale: false };
   try {
-    const info = JSON.parse(await readFile(APP_VERSION_PATH, "utf8"));
-    res.json({
-      versionCode: info.versionCode,
-      versionName: info.versionName,
-      url: "/download/app.apk",
+    const r = await fetch(`https://api.github.com/repos/${RELEASES_REPO}/releases?per_page=10`, {
+      headers: { Accept: "application/vnd.github+json", "User-Agent": "claude-remote" },
+      signal: AbortSignal.timeout(10_000),
     });
+    if (!r.ok) throw new Error(`GitHub respondió ${r.status}`);
+    ghCache = { at: Date.now(), list: (await r.json()).filter((x) => !x.draft) };
+    return { list: ghCache.list, stale: false };
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    if (ghCache.list) return { list: ghCache.list, stale: true };
+    throw err;
+  }
+}
+
+// Botón "📦 Releases": las 2 últimas con sus archivos.
+app.get("/api/releases", async (_req, res) => {
+  try {
+    const { list, stale } = await githubReleases();
+    const releases = list.slice(0, 2).map((x) => ({
+      tag: x.tag_name,
+      name: x.name || x.tag_name,
+      date: x.published_at,
+      url: x.html_url,
+      notes: String(x.body || "").slice(0, 3000),
+      assets: (x.assets || []).map((a) => ({ name: a.name, size: a.size, url: a.browser_download_url })),
+    }));
+    res.json({ repo: RELEASES_REPO, releases, ...(stale ? { stale } : {}) });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
   }
 });
 
-app.get("/download/app.apk", (_req, res) => {
+// --- Actualización de la app ------------------------------------------------
+// Fuentes: la local (app-version.json + claude-remote.apk) y la última release
+// de GitHub que traiga un .apk y un app-version.json ({versionCode, versionName}).
+// Gana el versionCode más alto. Si gana GitHub, /download/app.apk la baja una vez
+// a updates/ y la sirve: la app sigue bajando por el servidor (por la tailnet y
+// sin mandarle su clave a GitHub), así que funciona igual con apps viejas.
+let ghAppCache = { tag: null, info: null };
+async function githubApp() {
+  const { list } = await githubReleases();
+  for (const rel of list) {
+    if (rel.prerelease) continue;
+    const meta = rel.assets.find((a) => a.name === "app-version.json");
+    const apk = rel.assets.find((a) => a.name.toLowerCase().endsWith(".apk"));
+    if (!meta || !apk) continue;
+    if (ghAppCache.tag !== rel.tag_name) {
+      const r = await fetch(meta.browser_download_url, {
+        headers: { "User-Agent": "claude-remote" }, signal: AbortSignal.timeout(10_000),
+      });
+      if (!r.ok) throw new Error(`app-version.json de ${rel.tag_name}: ${r.status}`);
+      const info = await r.json();
+      ghAppCache = {
+        tag: rel.tag_name,
+        info: {
+          versionCode: Number(info.versionCode), versionName: String(info.versionName),
+          apk: { name: basename(apk.name), size: apk.size, url: apk.browser_download_url },
+        },
+      };
+    }
+    return ghAppCache.info;
+  }
+  return null;
+}
+
+async function latestApp() {
+  let local = null;
+  try {
+    const info = JSON.parse(await readFile(APP_VERSION_PATH, "utf8"));
+    if (existsSync(APK_PATH)) local = { versionCode: info.versionCode, versionName: info.versionName, source: "local" };
+  } catch { /* sin versión local */ }
+  let remote = null;
+  if (APP_UPDATES_GITHUB) {
+    try { remote = await githubApp(); } catch (err) { console.error("[update] GitHub:", err.message); }
+  }
+  if (remote && (!local || remote.versionCode > local.versionCode)) return { ...remote, source: "github" };
+  return local;
+}
+
+// Baja (una sola vez, aunque lleguen varios pedidos juntos) el APK de GitHub.
+const apkDownloads = new Map();
+function githubApk({ name, size, url }) {
+  const file = join(UPDATES_DIR, name);
+  if (!apkDownloads.has(file)) {
+    apkDownloads.set(file, (async () => {
+      if ((await stat(file).catch(() => null))?.size === size) return file;
+      await mkdir(UPDATES_DIR, { recursive: true });
+      const r = await fetch(url, { headers: { "User-Agent": "claude-remote" }, signal: AbortSignal.timeout(300_000) });
+      if (!r.ok) throw new Error(`descarga ${r.status}`);
+      const tmp = file + ".part";
+      await pipeline(Readable.fromWeb(r.body), createWriteStream(tmp));
+      if ((await stat(tmp)).size !== size) throw new Error("descarga incompleta");
+      await rename(tmp, file);
+      return file;
+    })().finally(() => apkDownloads.delete(file)));
+  }
+  return apkDownloads.get(file);
+}
+
+app.get("/api/app-version", async (_req, res) => {
+  const latest = await latestApp();
+  if (!latest) return res.status(404).json({ error: "sin versión de la app" });
+  res.json({ versionCode: latest.versionCode, versionName: latest.versionName, source: latest.source, url: "/download/app.apk" });
+});
+
+app.get("/download/app.apk", async (_req, res) => {
+  const latest = await latestApp();
+  if (latest?.source === "github") {
+    try {
+      return res.download(await githubApk(latest.apk), latest.apk.name);
+    } catch (err) {
+      console.error("[update] no se pudo bajar de GitHub:", err.message); // cae al APK local
+    }
+  }
   res.download(APK_PATH, "claude-remote.apk", (err) => {
     if (err && !res.headersSent) res.status(404).json({ error: "APK no disponible" });
   });
@@ -327,13 +490,22 @@ app.post("/api/upload", express.raw({ type: () => true, limit: "50mb" }), async 
 // --- Explorador / editor de archivos ---------------------------------------
 // Todo relativo a la carpeta del proyecto (`cwd`, que debe estar permitida);
 // nunca deja salir de ella con "..".
+const inside = (root, p) => {
+  const r = relative(root, p);
+  return !r.startsWith("..") && !isAbsolute(r); // ni escapa ni es otra unidad
+};
 async function projectPath(cwd, rel = "") {
   if (!cwd || !(await isAllowed(cwd))) return null;
   const root = resolve(cwd);
   const full = resolve(root, String(rel));
-  const r = relative(root, full);
-  if (r.startsWith("..") || isAbsolute(r)) return null; // escapa o es otra unidad
-  return full;
+  if (!inside(root, full)) return null;
+  // Accesos directos (symlinks/junctions): el destino real también debe quedar
+  // adentro. Un archivo nuevo se valida por su carpeta.
+  try {
+    const realRoot = await realpath(root);
+    const real = await realpath(full).catch(async () => join(await realpath(dirname(full)), basename(full)));
+    return inside(realRoot, real) ? full : null;
+  } catch { return null; }
 }
 
 app.get("/api/files", async (req, res) => {
@@ -361,7 +533,11 @@ app.get("/api/file", async (req, res) => {
   try {
     const st = await stat(file);
     if (!st.isFile()) return res.status(400).json({ error: "no es un archivo" });
-    if (req.query.raw) return res.sendFile(file, { dotfiles: "allow" });
+    if (req.query.raw) {
+      // Vista previa: el contenido del proyecto no es de confianza, que nunca corra.
+      res.setHeader("Content-Security-Policy", "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'");
+      return res.sendFile(file, { dotfiles: "allow" });
+    }
     const info = { size: st.size, mtime: st.mtimeMs };
     if (st.size > EDITOR_MAX_BYTES) return res.json({ ...info, tooBig: true });
     const buf = await readFile(file);
@@ -575,6 +751,20 @@ app.post("/api/push/unregister", (req, res) => {
 // Avisa cuando Claude emite la campana (BEL) —terminó o espera tu respuesta—,
 // pero solo si NO lo estás mirando (sesión sin clientes) y con antirrebote.
 const BELL_DEBOUNCE_MS = 4000;
+// La notificación pasa por Google: en vez de la ruta viaja un id opaco que la
+// app canjea por la carpeta (GET /api/push/target) al tocarla.
+const pushTargets = new Map(); // id → carpeta
+function pushTarget(cwd) {
+  for (const [id, p] of pushTargets) if (p === cwd) return `cr:${id}`;
+  const id = randomBytes(9).toString("hex");
+  pushTargets.set(id, cwd);
+  return `cr:${id}`;
+}
+app.get("/api/push/target", (req, res) => {
+  const p = pushTargets.get(String(req.query.id || "").replace(/^cr:/, ""));
+  p ? res.json({ path: p }) : res.status(404).json({ error: "notificación vencida" });
+});
+
 function maybeNotify(s) {
   if (!pushEnabled() || s.clients.size > 0 || s.stopping) return;
   const now = Date.now();
@@ -583,7 +773,7 @@ function maybeNotify(s) {
   sendPush({
     title: "Claude te necesita",
     body: `${basename(s.cwd)} · esperando tu respuesta`,
-    data: { path: s.cwd },
+    data: { path: pushTarget(s.cwd) },
   });
 }
 
@@ -660,12 +850,18 @@ function notifyBuild(s, found) {
     sendPush({
       title: "Build listo 📦",
       body: `${basename(s.cwd)} · ${list[0].name} — tocá para descargarlo`,
-      data: { path: s.cwd },
+      data: { path: pushTarget(s.cwd) },
     });
   }
 }
 
-wss.on("connection", (ws) => {
+// Cada 5 s: corta los WebSocket de celulares desvinculados (bandeja o `npm run devices`).
+setInterval(() => {
+  for (const ws of wss.clients) if (!deviceActive(ws.crDevice)) ws.terminate();
+}, 5000).unref();
+
+wss.on("connection", (ws, req) => {
+  ws.crDevice = req.crDevice;
   let session = null;
   let key = null;
 
@@ -769,6 +965,8 @@ setInterval(superviseTailnet, 15000);
 
 server.listen(PORT, HOST, () => {
   console.log(`Claude Remote → http://${HOST}:${PORT}`);
-  console.log(`Push FCM: ${pushEnabled() ? "activo" : "desactivado (falta firebase-service-account.json)"}`);
+  if (!["127.0.0.1", "localhost", "::1"].includes(HOST))
+    console.warn("⚠ Abierto a la red local SIN cifrar: la clave de la app viaja en texto plano. Usá Tailscale.");
+  console.log(`Push FCM: ${pushEnabled() ? `activo (${pushCredential()})` : "desactivado (falta firebase-service-account.json o push-sender.json)"}`);
   console.log(`Acceso: ${APP_ONLY ? "solo la app vinculada (npm run pair genera el código)" : "SIN clave (APP_ONLY=0)"}`);
 });

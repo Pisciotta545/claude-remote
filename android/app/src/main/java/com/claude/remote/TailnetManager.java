@@ -102,10 +102,23 @@ final class TailnetManager {
      */
     static HttpURLConnection open(Context ctx, String url) throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        // La clave y la cookie del reenvío van SOLO al servidor configurado: nunca
+        // a otra dirección (aunque alguien lograra hacer descargar otra URL).
+        if (!isServer(ctx, url)) return c;
         String key = prefs(ctx).getString(APP_KEY, null);
         if (key != null) c.setRequestProperty("X-CR-Key", key);
-        if (enabled(ctx) && url.startsWith("http://127.0.0.1:")) c.setRequestProperty("Cookie", cookie());
+        if (enabled(ctx)) c.setRequestProperty("Cookie", cookie());
         return c;
+    }
+
+    /** ¿Es el servidor? Con Tailscale integrado, el reenvío local; si no, la dirección configurada. */
+    static boolean isServer(Context ctx, String url) {
+        Uri u = Uri.parse(url);
+        if (u.getHost() == null || !"http".equals(u.getScheme()) && !"https".equals(u.getScheme())) return false;
+        if (enabled(ctx)) return port > 0 && "127.0.0.1".equals(u.getHost()) && u.getPort() == port;
+        Uri s = Uri.parse(prefs(ctx).getString("url", ""));
+        return s.getHost() != null && s.getHost().equalsIgnoreCase(u.getHost())
+            && s.getPort() == u.getPort() && String.valueOf(s.getScheme()).equals(u.getScheme());
     }
 
     /** Preferencia con la clave que da el servidor al vincular (POST /api/pair). */

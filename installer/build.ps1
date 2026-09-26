@@ -10,8 +10,8 @@ $stage = Join-Path $PSScriptRoot 'stage'
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force $stage | Out-Null
 
-foreach ($f in 'server.js', 'security.js', 'pair.js', 'push.js', 'package.json', 'package-lock.json',
-               'tray.ps1', 'tray.vbs', 'app-version.json') {
+foreach ($f in 'server.js', 'security.js', 'pair.js', 'devices.js', 'push.js', 'package.json', 'package-lock.json',
+               'tray.ps1', 'tray.vbs') {
     Copy-Item (Join-Path $root $f) $stage
 }
 Copy-Item -Recurse (Join-Path $root 'public') (Join-Path $stage 'public')
@@ -21,9 +21,20 @@ $ts = Join-Path $root 'claude-remote-ts.exe'
 if (-not (Test-Path $ts)) { & (Join-Path $root 'tailnet-host\build.ps1') }
 Copy-Item $ts $stage
 
-# APK que sirve el autoactualizador de la app (opcional).
-$apk = Join-Path $root 'claude-remote.apk'
-if (Test-Path $apk) { Copy-Item $apk $stage } else { Write-Warning 'Sin claude-remote.apk: la app no se autoactualizará desde esta instalación.' }
+# Clave limitada (solo enviar push) para que las notificaciones anden en otras
+# PC. NUNCA la completa (firebase-service-account.json).
+$sender = Join-Path $root 'push-sender.json'
+if (Test-Path $sender) { Copy-Item $sender $stage } else { Write-Warning 'Sin push-sender.json: en otras PC no habrá notificaciones.' }
+
+# APK de PRODUCCIÓN (firmado, no depurable) de la versión de app/build.gradle,
+# con su app-version.json: lo que instala y actualiza la app en esa PC.
+$gradle = Get-Content (Join-Path $root 'android/app/build.gradle') -Raw
+$vCode = [int]([regex]::Match($gradle, 'versionCode\s+(\d+)').Groups[1].Value)
+$vName = [regex]::Match($gradle, 'versionName\s+"([^"]+)"').Groups[1].Value
+$apk = Join-Path $root "android/app/build/outputs/apk/release/ClaudeRemote-v$vName.apk"
+if (-not (Test-Path $apk)) { throw "Falta $apk (cd android; ./gradlew.bat assembleRelease)" }
+Copy-Item $apk (Join-Path $stage 'claude-remote.apk')
+[System.IO.File]::WriteAllText((Join-Path $stage 'app-version.json'), (@{ versionCode = $vCode; versionName = $vName } | ConvertTo-Json))
 
 # Dependencias de producción (node-pty trae binarios precompilados: no compila).
 Push-Location $stage

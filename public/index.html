@@ -6,10 +6,11 @@
   <meta name="theme-color" content="#0f172a" />
   <link rel="manifest" href="/manifest.json" />
   <title>Claude Remote</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" />
-  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+  <!-- Todo servido por el propio servidor (sin CDNs; ver CSP en server.js). -->
+  <link rel="stylesheet" href="/tailwind.css" />
+  <link rel="stylesheet" href="/vendor/xterm/css/xterm.css" />
+  <script src="/vendor/xterm/lib/xterm.js"></script>
+  <script src="/vendor/addon-fit/addon-fit.js"></script>
   <style>
     html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
     #terminal { height: 100%; }
@@ -125,6 +126,7 @@
       <button id="pasteBtn">📥 Pegar</button>
       <button id="linksBtn">🔗 Links</button>
       <button id="usageBtn">📊 Uso</button>
+      <button id="releasesBtn">📦 Releases</button>
     </div>
     <input id="attach-input" type="file" multiple class="hidden" />
   </footer>
@@ -180,6 +182,18 @@
     </div>
   </div>
 
+  <!-- Últimas releases de GitHub (botón "Releases") -->
+  <div id="releases-modal" class="hidden fixed inset-0 z-50 bg-black/60 flex items-end">
+    <div class="bg-slate-800 w-full rounded-t-2xl p-4 flex flex-col gap-3 max-h-[80%]">
+      <div class="flex items-center justify-between">
+        <h2 class="text-base font-semibold">Releases</h2>
+        <button id="releases-close" class="text-slate-400 text-lg px-2 active:text-white">&#10005;</button>
+      </div>
+      <p class="text-[11px] text-slate-400">Tocá un archivo para guardarlo en la carpeta <b>Descargas</b> del celular.</p>
+      <div id="releases-list" class="space-y-4 overflow-y-auto"></div>
+    </div>
+  </div>
+
   <!-- Panel con los links detectados en la pantalla -->
   <div id="links-modal" class="hidden fixed inset-0 z-50 bg-black/60 flex items-end">
     <div class="bg-slate-800 w-full rounded-t-2xl p-4 flex flex-col gap-3 max-h-[80%]">
@@ -216,12 +230,6 @@
     </div>
   </div>
 
-  <script>
-    // Estilo compartido de los botones de la barra rápida y del editor.
-    document.querySelectorAll("#quickbar button, #ed-tools button, #ed-find button").forEach((b) =>
-      b.classList.add("bg-slate-700", "active:bg-emerald-600", "text-slate-100",
-        "text-sm", "font-mono", "px-3", "py-1.5", "rounded-lg", "whitespace-nowrap", "shrink-0"));
-  </script>
   <script src="/app.js"></script>
 </body>
 </html>

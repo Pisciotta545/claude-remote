@@ -1,6 +1,6 @@
 {
   "name": "claude-remote",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "productName": "ClaudeRemoteServer",
   "description": "Control remoto de Claude CLI desde Android vía Web/PWA (red local o Tailscale)",
   "type": "module",
@@ -8,14 +8,22 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "pair": "node pair.js"
+    "pair": "node pair.js",
+    "devices": "node devices.js",
+    "build:css": "tailwindcss -c tailwind.config.cjs -i tailwind.input.css -o public/tailwind.css --minify"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
+    "@xterm/addon-fit": "0.10.0",
+    "@xterm/xterm": "5.5.0",
+    "codemirror": "5.65.16",
     "express": "^4.19.2",
     "node-pty": "^1.0.0",
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "tailwindcss": "3.4.17"
   }
 }

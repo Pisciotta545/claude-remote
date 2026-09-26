@@ -3,6 +3,7 @@ package com.claude.remote;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.DownloadManager;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
@@ -15,6 +16,7 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -28,6 +30,7 @@ import android.view.View;
 import android.view.MenuItem;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.MimeTypeMap;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
@@ -61,6 +64,9 @@ public class MainActivity extends Activity {
     private String pendingPath; // proyecto a abrir al tocar una notificación
     private ValueCallback<Uri[]> fileCallback; // selector de archivos del botón "Adjuntar"
     private static final int REQ_FILES = 200;
+    private static final int REQ_STORAGE = 300;
+    /** Descarga a Descargas esperando el permiso de almacenamiento (Android 7–9): {url, nombre}. */
+    private String[] pendingDownload;
     // Descargas de APK (actualización o build) con notificaciones.
     private static final String DL_PROGRESS = "descargas";
     private static final String DL_DONE = "descargas_listas";
@@ -375,10 +381,11 @@ public class MainActivity extends Activity {
         CookieManager cm = CookieManager.getInstance();
         cm.setAcceptCookie(true);
         if (TailnetManager.enabled(this) && TailnetManager.running()) {
-            cm.setCookie(url, TailnetManager.cookie() + "; path=/");
+            cm.setCookie(url, TailnetManager.cookie() + "; path=/; HttpOnly; SameSite=Strict");
         }
         String key = prefs.getString(TailnetManager.APP_KEY, null);
-        cm.setCookie(url, "cr_key=" + (key != null ? key : "") + "; path=/", ok -> {
+        // HttpOnly: el JavaScript de la página no puede leer la clave.
+        cm.setCookie(url, "cr_key=" + (key != null ? key : "") + "; path=/; HttpOnly; SameSite=Strict", ok -> {
             cm.flush();
             loadWeb(url);
         });
@@ -466,6 +473,9 @@ public class MainActivity extends Activity {
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
+        // Nada de archivos locales ni content:// dentro del WebView.
+        s.setAllowFileAccess(false);
+        s.setAllowContentAccess(false);
         // Sin WebChromeClient, los diálogos JS (confirm/alert) no funcionan y
         // confirm() devuelve false → el botón "Cerrar" no hacía nada.
         web.setWebChromeClient(new WebChromeClient() {
@@ -750,6 +760,47 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    /**
+     * Guarda un archivo de internet (release de GitHub) en la carpeta pública
+     * Descargas con el DownloadManager del sistema: progreso y fin en su
+     * notificación, que al tocarla abre el archivo (un APK, el instalador).
+     * Android 7–9 necesita WRITE_EXTERNAL_STORAGE; desde 10 no.
+     */
+    private void saveToDownloads(String url, String name) {
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P
+                && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+            pendingDownload = new String[]{url, name};
+            requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQ_STORAGE);
+            return;
+        }
+        try {
+            int dot = name.lastIndexOf('.');
+            String mime = dot < 0 ? null
+                : MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substring(dot + 1).toLowerCase(java.util.Locale.US));
+            if (name.toLowerCase(java.util.Locale.US).endsWith(".apk")) mime = "application/vnd.android.package-archive";
+            DownloadManager.Request r = new DownloadManager.Request(Uri.parse(url))
+                .setTitle(name)
+                .setDescription("Claude Remote · Descargas")
+                .setMimeType(mime != null ? mime : "application/octet-stream")
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name);
+            ((DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE)).enqueue(r);
+            Toast.makeText(this, "Descargando " + name + " en Descargas…", Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            Toast.makeText(this, "No se pudo descargar: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQ_STORAGE || pendingDownload == null) return;
+        String[] d = pendingDownload;
+        pendingDownload = null;
+        if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) saveToDownloads(d[0], d[1]);
+        else Toast.makeText(this, "Sin permiso de almacenamiento no se puede guardar en Descargas", Toast.LENGTH_LONG).show();
+    }
+
     private static String mb(long bytes) {
         return String.format(java.util.Locale.US, "%.1f MB", bytes / 1048576.0);
     }
@@ -838,6 +889,14 @@ public class MainActivity extends Activity {
             if (!safe.toLowerCase().endsWith(".apk")) safe += ".apk";
             final String file = safe;
             runOnUiThread(() -> downloadAndInstall(url, file, file));
+        }
+
+        /** Guarda un archivo de internet (solo https) en la carpeta Descargas. */
+        @JavascriptInterface
+        public void saveToDownloads(String url, String name) {
+            if (url == null || !url.startsWith("https://")) return;
+            String safe = (name == null || name.isEmpty()) ? "descarga" : name.replaceAll("[^\\w.\\-]", "_");
+            runOnUiThread(() -> MainActivity.this.saveToDownloads(url, safe));
         }
 
         /** Copia texto al portapapeles del sistema. */

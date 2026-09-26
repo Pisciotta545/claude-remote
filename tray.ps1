@@ -7,14 +7,22 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$port = if ($env:PORT) { $env:PORT } else { 3000 }
+# Puerto: lo elige el servidor (PORT > config.json > 3000 en un clon de git >
+# uno libre al azar guardado en config.json); el tray lo lee de ahí.
+$configPath = Join-Path $here "config.json"
+function Get-Port {
+    if ($env:PORT) { return [int]$env:PORT }
+    try { $p = (Get-Content $configPath -Raw | ConvertFrom-Json).port; if ($p) { return [int]$p } } catch {}
+    return 3000
+}
+$port = Get-Port
 # Ruta de Node: la que trae el instalador (node\node.exe), la del PATH o la
 # instalación por defecto.
 $node = Join-Path $here "node\node.exe"
 if (-not (Test-Path $node)) { $node = (Get-Command node -ErrorAction SilentlyContinue).Source }
 if (-not $node) { $node = "C:\Program Files\nodejs\node.exe" }
 $serverJs = Join-Path $here "server.js"
-$tsStatus = if ($env:TAILNET_STATUS) { $env:TAILNET_STATUS } else { "127.0.0.1:3099" }
+function Get-TsStatus { if ($env:TAILNET_STATUS) { $env:TAILNET_STATUS } else { "127.0.0.1:$($port + 99)" } }
 $claudeSetupUrl = "https://docs.anthropic.com/en/docs/claude-code/setup"
 
 $script:proc = $null
@@ -77,12 +85,14 @@ $notify = New-Object System.Windows.Forms.NotifyIcon
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 
 $miPair    = $menu.Items.Add("Vincular celular…")
+$miDevices = $menu.Items.Add("Celulares vinculados…")
 $miAddr    = $menu.Items.Add("Dirección para la app")
 $miTsLogin = $menu.Items.Add("Iniciar sesión en Tailscale…")
 $miClaude  = $menu.Items.Add("⚠ Falta Claude Code: instalarlo…")
 $menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 $miToggle  = $menu.Items.Add("Detener servidor")
 $miRestart = $menu.Items.Add("Reiniciar servidor")
+$miPort    = $menu.Items.Add("Cambiar puerto…")
 $menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 $miExit    = $menu.Items.Add("Salir")
 
@@ -117,7 +127,7 @@ $script:claudeOk = [bool](Get-Command claude -ErrorAction SilentlyContinue) -or
     (Test-Path (Join-Path $env:USERPROFILE ".local\bin\claude.exe"))
 
 function Update-Tailnet {
-    try { $st = Invoke-RestMethod "http://$tsStatus/status" -TimeoutSec 1 } catch { $st = $null }
+    try { $st = Invoke-RestMethod "http://$(Get-TsStatus)/status" -TimeoutSec 1 } catch { $st = $null }
     $script:tsAuthUrl = if ($st -and $st.state -eq "NeedsLogin") { $st.authURL } else { "" }
     $script:tsAddr = if ($st -and $st.state -eq "Running" -and $st.ip) { "$($st.ip):$port" } else { "" }
     $miTsLogin.Visible = [bool]$script:tsAuthUrl
@@ -140,6 +150,83 @@ $miTsLogin.Visible = $false
 $miAddr.Visible = $false
 $miClaude.Visible = -not $script:claudeOk
 
+# Cambiar puerto: elige uno libre al azar (20000–29999, y +99 para el estado de
+# Tailscale), lo guarda en config.json y reinicia. La app necesita la dirección nueva.
+function Test-PortFree($p) {
+    try { $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $p); $l.Start(); $l.Stop(); return $true }
+    catch { return $false }
+}
+function Set-NewPort {
+    if ($env:PORT) {
+        [System.Windows.Forms.MessageBox]::Show("El puerto está fijado por la variable PORT ($env:PORT).", "Claude Remote") | Out-Null
+        return
+    }
+    $ok = [System.Windows.Forms.MessageBox]::Show(
+        "Se elige un puerto libre nuevo y se reinicia el servidor.`n`nDespués, en la app del celular, poné la dirección nueva (menú → Dirección para la app).",
+        "Claude Remote · Cambiar puerto", "OKCancel")
+    if ($ok -ne "OK") { return }
+    Stop-Server
+    $new = 0
+    for ($i = 0; $i -lt 50 -and -not $new; $i++) {
+        $p = Get-Random -Minimum 20000 -Maximum 30000
+        if ((Test-PortFree $p) -and (Test-PortFree ($p + 99))) { $new = $p }
+    }
+    if (-not $new) { [System.Windows.Forms.MessageBox]::Show("No encontré un puerto libre.", "Claude Remote") | Out-Null; Start-Server; return }
+    $cfg = @{}
+    try { (Get-Content $configPath -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $cfg[$_.Name] = $_.Value } } catch {}
+    $cfg.port = $new
+    # Sin BOM: Node no parsea JSON con BOM.
+    [System.IO.File]::WriteAllText($configPath, ($cfg | ConvertTo-Json))
+    $script:port = $new
+    $script:portWarned = $false
+    Start-Server
+}
+$miPort.Add_Click({ Set-NewPort })
+
+# Celulares vinculados (devices.js): cada uno tiene su clave; desvincular uno lo
+# echa al instante (el servidor corta su conexión) sin tocar a los demás.
+function Show-Devices {
+    $json = & $node (Join-Path $here "devices.js") --json 2>$null | Out-String
+    try { $script:devList = @($json | ConvertFrom-Json) } catch { $script:devList = @() }
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = "Claude Remote · Celulares vinculados"
+    $f.Size = New-Object System.Drawing.Size(520, 330)
+    $f.StartPosition = "CenterScreen"
+    $f.TopMost = $true
+    $f.FormBorderStyle = "FixedDialog"
+    $f.MaximizeBox = $false
+    $info = New-Object System.Windows.Forms.Label
+    $info.Text = "Si perdés un celular o ya no lo usás, desvinculalo: queda afuera al instante."
+    $info.SetBounds(12, 10, 480, 20)
+    $lb = New-Object System.Windows.Forms.ListBox
+    $lb.SetBounds(12, 34, 480, 200)
+    foreach ($d in $script:devList) {
+        $when = if ($d.created) { " · desde $("$($d.created)".Substring(0, 10))" } else { "" }
+        [void]$lb.Items.Add("$($d.name)$when")
+    }
+    if (-not $script:devList.Count) { [void]$lb.Items.Add("(ningún celular vinculado)"); $lb.Enabled = $false }
+    $btn = New-Object System.Windows.Forms.Button
+    $btn.Text = "Desvincular"
+    $btn.SetBounds(12, 244, 120, 30)
+    $btn.Add_Click({
+        $i = $lb.SelectedIndex
+        if ($i -lt 0 -or -not $script:devList.Count) { return }
+        $d = $script:devList[$i]
+        $ok = [System.Windows.Forms.MessageBox]::Show("¿Desvincular `"$($d.name)`"? Para volver a usarlo habrá que vincularlo de nuevo.", "Claude Remote", "YesNo")
+        if ($ok -ne "Yes") { return }
+        & $node (Join-Path $here "devices.js") revoke $d.id | Out-Null
+        $script:devList = @($script:devList | Where-Object { $_.id -ne $d.id })
+        $lb.Items.RemoveAt($i)
+    })
+    $close = New-Object System.Windows.Forms.Button
+    $close.Text = "Cerrar"
+    $close.SetBounds(392, 244, 100, 30)
+    $close.Add_Click({ $f.Close() })
+    $f.Controls.AddRange(@($info, $lb, $btn, $close))
+    [void]$f.ShowDialog()
+}
+$miDevices.Add_Click({ Show-Devices })
+
 $miPair.Add_Click({ Show-PairingCode })
 $miToggle.Add_Click({ if (Test-Running) { Stop-Server } else { Start-Server } })
 $miRestart.Add_Click({ Restart-Server })
@@ -156,11 +243,22 @@ $notify.Visible = $true
 
 # Supervisor: si se cayó mientras debía correr, lo relanza. Tailscale se
 # consulta cada 5 ticks (15 s).
+# Si el servidor salió con 98 (puerto ocupado) no se relanza en bucle: se avisa.
 $script:tick = 0
+$script:portWarned = $false
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 3000
 $timer.Add_Tick({
-    if ($script:wantRunning -and -not (Test-Running)) { Start-Server }
+    if ($script:wantRunning -and -not (Test-Running)) {
+        if ($script:proc -and $script:proc.ExitCode -eq 98) {
+            $script:wantRunning = $false
+            if (-not $script:portWarned) {
+                $script:portWarned = $true
+                $notify.ShowBalloonTip(15000, "Claude Remote", "El puerto $port está ocupado por otro programa. Clic derecho → Cambiar puerto…", "Warning")
+            }
+        } else { Start-Server }
+    }
+    $script:port = Get-Port
     Update-Ui
     if ($script:tick++ % 5 -eq 1) { Update-Tailnet }
 })

@@ -11,7 +11,7 @@ Para usarlo en otra PC sin clonar el repo: descargar `ClaudeRemoteServer-v<versi
 3. Instalar la app en el celular; como dirección, la de *Dirección para la app* del menú (se copia con un clic).
 4. Menú → *Vincular celular…* y escribir el código en la app.
 
-Se instala en `%LOCALAPPDATA%\Programs\ClaudeRemote` con acceso en el menú Inicio y (opcional) autoarranque. Push no funciona en otra PC (el APK está atado a este proyecto de Firebase). Compilar el instalador: `powershell installer/build.ps1` (requiere Inno Setup 6).
+Se instala en `%LOCALAPPDATA%\Programs\ClaudeRemote` con acceso en el menú Inicio y (opcional) autoarranque. Cada PC usa un **puerto propio** elegido al azar la primera vez (lo muestra *Dirección para la app*); si otro programa lo ocupa, la bandeja avisa y *Cambiar puerto…* elige otro. La app se **actualiza desde GitHub** (vía el servidor) y las notificaciones andan con una clave limitada que solo puede mandar push (`push-sender.json`). Compilar el instalador: `powershell installer/build.ps1` (requiere Inno Setup 6).
 
 ## Requisitos
 
@@ -51,9 +51,10 @@ $s.TargetPath = "wscript.exe"; $s.Arguments = "`"$PWD\tray.vbs`""; $s.Save()
 
 | Variable | Defecto | Descripción |
 |----------|---------|-------------|
-| `PORT` | `3000` | Puerto HTTP/WebSocket |
+| `PORT` | `config.json` · `3000` en un clon de git · al azar instalado | Puerto HTTP/WebSocket |
 | `HOST` | `127.0.0.1` | Interfaz de escucha. Solo local: el nodo `claude-remote-pc` reenvía ahí. `0.0.0.0` lo abre a la red local |
 | `APP_ONLY` | (activo) | `0` = acepta pedidos sin la clave de la app vinculada (p. ej. probar desde el navegador de la PC). Afecta también a lo que llega por Tailscale |
+| `RELEASES_REPO` | `Pisciotta545/claude-remote` | Repo de GitHub (`dueño/nombre`, público) cuyas releases muestra el botón 📦 Releases |
 | `ALLOWED_HOSTS` | — | Nombres de host extra aceptados (separados por `;`); por defecto IPs, `localhost` y `claude-remote-pc` |
 | `CLAUDE_CMD` | `claude --dangerously-skip-permissions` | Comando a ejecutar en el PTY (sin prompts de permiso) |
 | `SHELL` | `powershell.exe` (Windows) · `bash` (Unix) | Shell que lanza el comando. Los argumentos se eligen según el shell real: PowerShell → `-NoLogo -Command`, cmd → `/c`, POSIX → `-lc` |
@@ -62,15 +63,16 @@ $s.TargetPath = "wscript.exe"; $s.Arguments = "`"$PWD\tray.vbs`""; $s.Save()
 | `CLAUDE_CWD` | home del usuario | Carpeta por defecto si no se elige proyecto |
 | `SESSION_IDLE_MS` | `0` (nunca) | Ms que sobrevive la sesión sin clientes conectados. `0` = sigue en segundo plano hasta pulsar "Cerrar" |
 | `SESSION_BUFFER_BYTES` | `200000` | Tope del buffer de pantalla que se reenvía al reconectar |
-| `FIREBASE_SA_PATH` | `firebase-service-account.json` (raíz) | Service account de Firebase para enviar push. Si falta, el push queda desactivado |
+| `FIREBASE_SA_PATH` | `firebase-service-account.json`, si no `push-sender.json` (raíz) | Service account de Firebase para enviar push. Si falta, el push queda desactivado |
 | `PUSH_TOKENS_PATH` | `push-tokens.json` (raíz) | Archivo donde se guardan los tokens FCM de los dispositivos |
-| `APK_PATH` | `claude-remote.apk` (raíz) | Ruta del APK que sirve el autoactualizador |
+| `APK_PATH` | `claude-remote.apk` (raíz) | Ruta del APK local del autoactualizador |
+| `APP_UPDATES` | (GitHub) | `local` = no buscar la app en las releases de GitHub, solo el APK local |
 | `BUILD_EXTS` | `.apk` | Extensiones (separadas por `;`) que, al generarse en la carpeta de una sesión, se ofrecen para descargar al celular. Vacío = desactivado |
 | `UPLOAD_DIR` | `%TEMP%/claude-remote-uploads` | Dónde se guardan los archivos adjuntados desde el celular |
 | `EDITOR_MAX_BYTES` | `2000000` | Tamaño máximo de archivo que abre el editor de la app |
 | `TAILNET` | (activo) | `0` = no lanzar el Tailscale integrado de la PC |
 | `TAILNET_BIN` | `claude-remote-ts.exe` (raíz) | Binario del Tailscale integrado de la PC |
-| `TAILNET_STATUS` | `127.0.0.1:3099` | Dirección local del estado de ese nodo |
+| `TAILNET_STATUS` | `127.0.0.1:<PORT+99>` | Dirección local del estado de ese nodo |
 | `TAILNET_HOSTNAME` | `claude-remote-pc` | Nombre de la PC en la tailnet (lo lee el binario) |
 
 ### Tailscale integrado en la PC (sin la app de Tailscale)
@@ -106,10 +108,10 @@ powershell android/tailnet/build.ps1   # → android/app/libs/tailnet.aar
 
 ```bash
 cd android
-./gradlew.bat assembleDebug   # Windows (usar ./gradlew en Linux/Mac)
+./gradlew.bat assembleRelease   # Windows (usar ./gradlew en Linux/Mac)
 ```
 
-APK firmado (clave de debug) en `android/app/build/outputs/apk/debug/ClaudeRemote-v<versión>.apk`.
+APK de producción (firmado con `android/keystore.properties`, no depurable) en `android/app/build/outputs/apk/release/ClaudeRemote-v<versión>.apk`. Sin `keystore.properties` sale sin firmar.
 
 ### Instalar y usar
 
@@ -130,6 +132,7 @@ APK firmado (clave de debug) en `android/app/build/outputs/apk/debug/ClaudeRemot
 | **📁 Archivos** | Explorador de la carpeta del proyecto. Los archivos se abren en un editor con resaltado de sintaxis (CodeMirror), en modo lectura para no abrir el teclado: **✏ Editar** habilita la escritura; **💾 Guardar** los escribe en la PC (conserva CRLF/BOM y avisa si Claude lo modificó mientras tanto). Además: buscar, deshacer/rehacer, Tab, ajuste de línea, recargar, vista previa de imágenes y **@ Claude** (menciona el archivo en el prompt). Atrás: editor → archivos → terminal |
 | **📎 Adjuntar** | Sube fotos/archivos a la PC y escribe su ruta en el prompt para que Claude los lea |
 | **📋 Copiar / 📥 Pegar / 🔗 Links / 📊 Uso** | Portapapeles, URLs de la pantalla y uso del plan |
+| **📦 Releases** | Las 2 últimas releases de GitHub con sus archivos y novedades; tocar uno lo guarda en la carpeta **Descargas** del celular (progreso en la notificación del sistema; tocarla abre el archivo). Requiere internet en el celular |
 
 **Build → celular:** si Claude genera un `.apk` (o lo que diga `BUILD_EXTS`) dentro del proyecto, la app pregunta si querés descargarlo e instalarlo. Si no estás mirando esa sesión llega una notificación; al tocarla se abre el proyecto con la pregunta.
 
@@ -199,6 +202,8 @@ Cuando Claude termina o queda esperando tu respuesta emite la **campana de termi
 
 ## Seguridad
 
-⚠️ El servidor da acceso completo a una terminal con tu sesión de Claude. Solo acepta la **app vinculada**: la primera vez la app pide un código de 6 dígitos que se genera en la PC (bandeja → *Vincular celular…* o `npm run pair`; vale 5 minutos, un uso, 5 intentos) y recibe una clave que manda en cada pedido. Un navegador (aunque sea en la PC) recibe 401. Borrar `app-key.txt` desvincula todos los celulares. Además escucha solo en `127.0.0.1` y se llega únicamente por tu tailnet (`claude-remote-pc`, tráfico cifrado con WireGuard). **Nunca** lo expongas a internet abierto; `HOST=0.0.0.0` solo en una red local de confianza. Si perdés el celular, borrá su equipo en la consola de Tailscale.
+⚠️ El servidor da acceso completo a una terminal con tu sesión de Claude. Solo acepta la **app vinculada**: la primera vez la app pide un código de 6 dígitos que se genera en la PC (bandeja → *Vincular celular…* o `npm run pair`; vale 5 minutos, un uso, 5 intentos) y recibe una **clave propia** que manda en cada pedido (la PC guarda solo su huella). Un navegador (aunque sea en la PC) recibe 401. Si perdés un celular: bandeja → *Celulares vinculados…* → *Desvincular* (o `npm run devices`); queda afuera al instante sin tocar a los demás.
+
+La web no carga nada de internet (librerías servidas por la PC, CSP que bloquea scripts ajenos). La app no es depurable, no hace copia de seguridad de sus datos y solo le manda la clave a tu servidor. Cada release publica las huellas SHA-256 de sus archivos y la del certificado del APK para verificarlos. Además escucha solo en `127.0.0.1` y se llega únicamente por tu tailnet (`claude-remote-pc`, tráfico cifrado con WireGuard). **Nunca** lo expongas a internet abierto; `HOST=0.0.0.0` solo en una red local de confianza. Si perdés el celular, borrá su equipo en la consola de Tailscale.
 
 ⚠️ Por defecto Claude corre con `--dangerously-skip-permissions` (sin confirmaciones): puede ejecutar acciones sin pedir permiso. Para restaurar los prompts, definí `CLAUDE_CMD=claude`.

@@ -3,12 +3,16 @@
 import { writeFile } from "fs/promises";
 import { existsSync, readFileSync } from "fs";
 import { createSign } from "crypto";
-import { join, dirname } from "path";
+import { join, dirname, basename } from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// Credencial para ENVIAR (distinta del google-services.json, que es para recibir).
-const SA_PATH = process.env.FIREBASE_SA_PATH || join(__dirname, "firebase-service-account.json");
+// Credencial para ENVIAR (distinta del google-services.json, que es para recibir):
+// la completa del proyecto (solo en la PC del autor) o push-sender.json, una
+// cuenta que SOLO puede mandar notificaciones y viaja en el instalador.
+const SA_PATH = process.env.FIREBASE_SA_PATH ||
+  ["firebase-service-account.json", "push-sender.json"].map((f) => join(__dirname, f)).find(existsSync) ||
+  join(__dirname, "firebase-service-account.json");
 const TOKENS_PATH = process.env.PUSH_TOKENS_PATH || join(__dirname, "push-tokens.json");
 
 let sa = null;
@@ -19,6 +23,7 @@ try {
 }
 
 export const pushEnabled = () => !!sa;
+export const pushCredential = () => (sa ? basename(SA_PATH) : null);
 
 // --- Tokens de dispositivos (persisten entre reinicios) --------------------
 let tokens = new Set();

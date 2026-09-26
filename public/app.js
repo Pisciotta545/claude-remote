@@ -1,3 +1,8 @@
+// Estilo compartido de los botones de la barra rápida y del editor.
+document.querySelectorAll("#quickbar button, #ed-tools button, #ed-find button").forEach((b) =>
+  b.classList.add("bg-slate-700", "active:bg-emerald-600", "text-slate-100",
+    "text-sm", "font-mono", "px-3", "py-1.5", "rounded-lg", "whitespace-nowrap", "shrink-0"));
+
 // --- Terminal --------------------------------------------------------------
 const term = new Terminal({
   cursorBlink: true,
@@ -148,9 +153,17 @@ backBtn.addEventListener("click", goBack);
 window.__crInProject = false;
 window.__crGoBack = () => { goBack(); };
 
-// Puente para abrir un proyecto por ruta al tocar la notificación push.
-window.__crOpenProject = (path) => {
+// Puente para abrir un proyecto al tocar la notificación push. La notificación
+// trae un id opaco ("cr:…", la ruta no pasa por Google) que el servidor canjea.
+window.__crOpenProject = async (path) => {
   if (!path) return;
+  if (path.startsWith("cr:")) {
+    try {
+      const r = await fetch(`/api/push/target?id=${encodeURIComponent(path)}`);
+      if (!r.ok) return; // vencida (el servidor se reinició): queda en el selector
+      path = (await r.json()).path;
+    } catch { return; }
+  }
   const name = path.split(/[\\/]/).filter(Boolean).pop() || path;
   if (ws) { ws.onclose = null; ws.close(); ws = null; } // corta la sesión anterior
   openProject({ name, path });
@@ -568,7 +581,7 @@ attachInput.addEventListener("change", async () => {
 
 // --- Archivos: explorador y editor -----------------------------------------
 // Explora la carpeta del proyecto (/api/files) y abre archivos en CodeMirror 5
-// (se carga del CDN la primera vez). Se abren en modo lectura (sin teclado);
+// (se carga de /vendor la primera vez). Se abren en modo lectura (sin teclado);
 // "Editar" habilita la escritura y "Guardar" los escribe en la PC.
 const filesPath = document.getElementById("files-path");
 const filesList = document.getElementById("files-list");
@@ -583,7 +596,7 @@ const edWrapBtn = document.getElementById("ed-wrap");
 const edFind = document.getElementById("ed-find");
 const edFindInput = document.getElementById("ed-find-input");
 
-const CM_BASE = "https://cdn.jsdelivr.net/npm/codemirror@5.65.16";
+const CM_BASE = "/vendor/codemirror";
 const IMG_RE = /\.(png|jpe?g|gif|webp|bmp|ico)$/i;
 const SAVE_LABEL = "&#128190; Guardar";
 let filesDir = ""; // carpeta actual, relativa al proyecto ("a/b")
@@ -962,6 +975,66 @@ document.getElementById("paste-send").addEventListener("click", () => {
   pasteModal.classList.add("hidden");
   if (t) { send({ type: "input", data: t }); term.focus(); }
 });
+
+// --- Releases de GitHub: ver las 2 últimas y bajar sus archivos ------------
+// En la app se guardan en Descargas con el DownloadManager (CRNative.saveToDownloads);
+// en una app vieja o en el navegador, se abre el link y el navegador los descarga.
+const releasesModal = document.getElementById("releases-modal");
+const releasesList = document.getElementById("releases-list");
+
+function saveToDownloads(asset, btn) {
+  if (window.CRNative && CRNative.saveToDownloads) CRNative.saveToDownloads(asset.url, asset.name);
+  else openUrl(asset.url);
+  const label = btn.querySelector("[data-label]");
+  const prev = label.textContent;
+  label.textContent = "✓ Descargando… (mirá las notificaciones)";
+  setTimeout(() => (label.textContent = prev), 3000);
+}
+
+function renderReleases(data) {
+  releasesList.innerHTML = "";
+  if (!data.releases.length) {
+    releasesList.innerHTML = '<p class="text-sm text-slate-400">Este repo todavía no tiene releases.</p>';
+    return;
+  }
+  data.releases.forEach((r, i) => {
+    const box = document.createElement("div");
+    box.className = "bg-slate-900/60 rounded-xl p-3 space-y-2";
+    box.innerHTML =
+      `<div class="flex items-baseline gap-2">` +
+      `<span class="text-sm font-semibold">${escapeHtml(r.name)}</span>` +
+      (i === 0 ? '<span class="text-[10px] bg-emerald-700 rounded px-1.5 py-0.5 shrink-0">Última</span>' : "") +
+      `<span class="ml-auto text-[11px] text-slate-500 shrink-0">${r.date ? new Date(r.date).toLocaleDateString() : ""}</span></div>` +
+      (r.notes ? `<details class="text-[11px] text-slate-400"><summary class="cursor-pointer">Novedades</summary>` +
+        `<pre class="whitespace-pre-wrap font-sans mt-1">${escapeHtml(r.notes)}</pre></details>` : "");
+    if (!r.assets.length) box.insertAdjacentHTML("beforeend", '<p class="text-[11px] text-slate-500">Sin archivos.</p>');
+    for (const a of r.assets) {
+      const b = document.createElement("button");
+      b.className = "w-full text-left bg-slate-700 active:bg-emerald-600 rounded-lg px-3 py-2";
+      b.innerHTML = `<div class="text-sm font-mono break-all">⬇ ${escapeHtml(a.name)}</div>` +
+        `<div data-label class="text-[11px] text-slate-400">${fmtSize(a.size)}</div>`;
+      b.addEventListener("click", () => saveToDownloads(a, b));
+      box.appendChild(b);
+    }
+    releasesList.appendChild(box);
+  });
+  if (data.stale) releasesList.insertAdjacentHTML("beforeend", '<p class="text-[11px] text-amber-400">Sin conexión con GitHub: se muestra la última lista obtenida.</p>');
+}
+
+document.getElementById("releasesBtn").addEventListener("click", async () => {
+  releasesModal.classList.remove("hidden");
+  releasesList.innerHTML = '<p class="text-sm text-slate-400">Cargando…</p>';
+  try {
+    const r = await fetch("/api/releases");
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.status);
+    renderReleases(data);
+  } catch (err) {
+    releasesList.innerHTML = `<p class="text-sm text-red-400">No se pudieron cargar las releases: ${escapeHtml(err.message)}</p>`;
+  }
+});
+document.getElementById("releases-close").addEventListener("click", () => releasesModal.classList.add("hidden"));
+releasesModal.addEventListener("click", (e) => { if (e.target === releasesModal) releasesModal.classList.add("hidden"); });
 
 // --- Métricas de uso -------------------------------------------------------
 const bar = document.getElementById("usage-bar");

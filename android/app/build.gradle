@@ -3,6 +3,12 @@ plugins {
     id 'com.google.gms.google-services'
 }
 
+// Firma de producción: android/keystore.properties (fuera de git) apunta al .jks.
+// El APK de release no es depurable (sin adb run-as ni inspección del WebView).
+def keystoreProps = new Properties()
+def keystoreFile = rootProject.file("keystore.properties")
+if (keystoreFile.exists()) keystoreFile.withInputStream { keystoreProps.load(it) }
+
 android {
     namespace 'com.claude.remote'
     compileSdk 35
@@ -11,17 +17,29 @@ android {
         applicationId "com.claude.remote"
         minSdk 24
         targetSdk 35
-        versionCode 17
-        versionName "2.6"
+        versionCode 19
+        versionName "2.8"
     }
 
     buildFeatures {
         buildConfig true
     }
 
+    signingConfigs {
+        release {
+            if (keystoreFile.exists()) {
+                storeFile file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
+            if (keystoreFile.exists()) signingConfig signingConfigs.release
         }
     }
 
