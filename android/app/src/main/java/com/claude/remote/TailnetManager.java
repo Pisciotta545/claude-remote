@@ -111,6 +111,7 @@ final class TailnetManager {
     private static final String GO_CRASH = "crash.txt";
     private static final String JAVA_CRASH = "crash-java.txt";
     private static final String LOG = "tailnet.log";
+    private static final String LAST_REPORT = "last-crash.txt";
 
     static File dir(Context ctx) {
         return new File(ctx.getFilesDir(), "tailscale");
@@ -187,8 +188,22 @@ final class TailnetManager {
         if (!go.isEmpty()) sb.append("\n== Error de Go ==\n").append(go).append('\n');
         if (!java.isEmpty()) sb.append("\n== Error de Java ==\n").append(java).append('\n');
         sb.append("\n== Registro de Tailscale (últimas líneas) ==\n").append(readTail(new File(d, LOG), 80));
-        return sb.toString();
+        String report = sb.toString();
+        // Queda guardado para verlo cuando se pida (menú ⋮ → Ver último cierre).
+        try (java.io.FileOutputStream f = new java.io.FileOutputStream(new File(d, LAST_REPORT))) {
+            f.write(report.getBytes("UTF-8"));
+        } catch (Exception ignored) {
+            /* sin disco: solo se pierde el reporte */
+        }
+        return report;
     }
+
+    /** Último reporte de cierre guardado, o null si no hay. */
+    static String lastReport(Context ctx) {
+        String r = readTail(new File(dir(ctx), LAST_REPORT), 1000);
+        return r.isEmpty() ? null : r;
+    }
+
 
     /** Últimas {@code maxLines} líneas de un archivo de texto ("" si no existe). */
     private static String readTail(File f, int maxLines) {

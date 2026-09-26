@@ -34,8 +34,12 @@ const projName = document.getElementById("proj-name");
 const projList = document.getElementById("proj-list");
 const pickerHint = document.getElementById("picker-hint");
 
+const filesEl = document.getElementById("files");
+const editorEl = document.getElementById("editor");
+
 let ws;
 let currentProject = null; // { name, path }
+let view = "picker"; // picker | terminal | files | editor
 
 // --- Diálogo de confirmación propio (en vez del confirm() nativo) ----------
 const confirmModal = document.getElementById("confirm-modal");
@@ -74,12 +78,10 @@ function showPicker() {
     ws = null;
   }
   term.reset();
-  picker.classList.remove("hidden");
-  terminalEl.classList.add("hidden");
-  quickbar.classList.add("hidden");
+  setView("picker");
+  resetFiles();
   backBtn.classList.add("hidden");
   stopBtn.classList.add("hidden");
-  scrollCtrls.classList.add("hidden");
   document.getElementById("build-modal").classList.add("hidden"); // se reofrece al volver
   projName.textContent = "Uso de tokens";
   window.__crInProject = false; // el botón físico de Android sale de la app
@@ -88,12 +90,10 @@ function showPicker() {
 
 function openProject(proj) {
   currentProject = proj;
-  picker.classList.add("hidden");
-  terminalEl.classList.remove("hidden");
-  quickbar.classList.remove("hidden");
+  resetFiles();
+  setView("terminal");
   backBtn.classList.remove("hidden");
   stopBtn.classList.remove("hidden");
-  scrollCtrls.classList.remove("hidden");
   projName.textContent = proj.name;
   window.__crInProject = true; // el botón físico de Android vuelve al selector
   // Espera a que el contenedor recién mostrado tenga layout antes de medir, para
@@ -106,12 +106,47 @@ function openProject(proj) {
   }));
 }
 
-// Flecha ←: vuelve al selector pero DEJA la sesión corriendo en segundo plano.
-backBtn.addEventListener("click", showPicker);
+// Muestra una de las vistas. terminal/files/editor son de un proyecto; la
+// sesión sigue viva mientras se miran los archivos.
+function setView(v) {
+  view = v;
+  picker.classList.toggle("hidden", v !== "picker");
+  terminalEl.classList.toggle("hidden", v !== "terminal");
+  quickbar.classList.toggle("hidden", v !== "terminal");
+  scrollCtrls.classList.toggle("hidden", v !== "terminal");
+  filesEl.classList.toggle("hidden", v !== "files");
+  editorEl.classList.toggle("hidden", v !== "editor");
+  // Cierra el teclado de la vista anterior y vuelve la página arriba.
+  if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+  window.scrollTo(0, 0);
+  // Al volver a la terminal, re-medir (pudo cambiar el tamaño mientras estaba oculta).
+  if (v === "terminal" && ws) requestAnimationFrame(() => { fit.fit(); sendResize(); });
+}
+
+// El WebView desplaza el documento entero para mostrar el cursor al abrir el
+// teclado y a veces no lo devuelve: el encabezado (con la ←) quedaba tapado.
+// Sin un campo de texto con foco, la página siempre vuelve arriba.
+const typing = () => {
+  const a = document.activeElement;
+  return !!a && (a.isContentEditable || a.tagName === "INPUT" || a.tagName === "TEXTAREA");
+};
+const unscroll = () => { if (window.scrollY && !typing()) window.scrollTo(0, 0); };
+window.addEventListener("scroll", unscroll, { passive: true });
+document.addEventListener("focusout", () => setTimeout(unscroll, 300)); // tras cerrar el teclado
+if (window.visualViewport) window.visualViewport.addEventListener("resize", unscroll);
+
+// Flecha ← y botón físico: editor → archivos → terminal → selector (la sesión
+// queda corriendo en segundo plano).
+function goBack() {
+  if (view === "editor") return closeEditor();
+  if (view === "files") return setView("terminal");
+  showPicker();
+}
+backBtn.addEventListener("click", goBack);
 
 // Puente con el botón físico "atrás" de la app Android (ver MainActivity).
 window.__crInProject = false;
-window.__crGoBack = () => showPicker();
+window.__crGoBack = () => { goBack(); };
 
 // Puente para abrir un proyecto por ruta al tocar la notificación push.
 window.__crOpenProject = (path) => {
@@ -529,6 +564,289 @@ attachInput.addEventListener("change", async () => {
     send({ type: "input", data: " " + paths.join(" ") + " " });
     term.focus();
   }
+});
+
+// --- Archivos: explorador y editor -----------------------------------------
+// Explora la carpeta del proyecto (/api/files) y abre archivos en CodeMirror 5
+// (se carga del CDN la primera vez). Se abren en modo lectura (sin teclado);
+// "Editar" habilita la escritura y "Guardar" los escribe en la PC.
+const filesPath = document.getElementById("files-path");
+const filesList = document.getElementById("files-list");
+const filesUp = document.getElementById("files-up");
+const edHost = document.getElementById("editor-host");
+const edMsg = document.getElementById("ed-msg");
+const edName = document.getElementById("ed-name");
+const edDirty = document.getElementById("ed-dirty");
+const edSave = document.getElementById("ed-save");
+const edEditBtn = document.getElementById("ed-edit");
+const edWrapBtn = document.getElementById("ed-wrap");
+const edFind = document.getElementById("ed-find");
+const edFindInput = document.getElementById("ed-find-input");
+
+const CM_BASE = "https://cdn.jsdelivr.net/npm/codemirror@5.65.16";
+const IMG_RE = /\.(png|jpe?g|gif|webp|bmp|ico)$/i;
+const SAVE_LABEL = "&#128190; Guardar";
+let filesDir = ""; // carpeta actual, relativa al proyecto ("a/b")
+let filesSeq = 0; // descarta respuestas viejas si se navega rápido
+let cm = null; // instancia de CodeMirror (una sola, se reutiliza)
+let cmLoading = null;
+let edPath = null; // archivo abierto (relativo al proyecto)
+let edFile = null; // { path, mtime, eol, bom } si es texto editable
+let edClean = 0; // generación "limpia" de CodeMirror (al abrir/guardar)
+let edHit = null; // resaltado de la última búsqueda
+
+const qs = (o) => Object.entries(o).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
+const fileUrl = (rel, extra = {}) => `/api/file?${qs({ cwd: currentProject.path, path: rel, ...extra })}`;
+// Muestra una ruta larga recortada por la izquierda (se ve el final).
+const setPathText = (el, t) => (el.innerHTML = `<bdi dir="ltr">${escapeHtml(t)}</bdi>`);
+const isDirty = () => !!(cm && edFile && !cm.isClean(edClean));
+
+function resetFiles() {
+  filesDir = "";
+  edPath = edFile = null;
+  if (cm) { cm.setValue(""); cm.clearHistory(); }
+}
+
+document.getElementById("filesBtn").addEventListener("click", () => {
+  setView("files");
+  loadDir(filesDir);
+});
+document.getElementById("files-term").addEventListener("click", () => setView("terminal"));
+document.getElementById("files-refresh").addEventListener("click", () => loadDir(filesDir));
+filesUp.addEventListener("click", () => loadDir(filesDir.split("/").slice(0, -1).join("/")));
+
+async function loadDir(dir) {
+  if (!currentProject) return;
+  const seq = ++filesSeq;
+  filesDir = dir;
+  setPathText(filesPath, currentProject.name + (dir ? "/" + dir : ""));
+  filesUp.disabled = !dir;
+  filesList.innerHTML = '<p class="text-sm text-slate-400 p-2">Cargando…</p>';
+  try {
+    const r = await fetch(`/api/files?${qs({ cwd: currentProject.path, dir })}`);
+    const data = await r.json();
+    if (seq !== filesSeq) return;
+    if (!r.ok) throw new Error(data.error || r.status);
+    filesList.innerHTML = data.entries.length ? "" : '<p class="text-sm text-slate-400 p-2">Carpeta vacía.</p>';
+    for (const e of data.entries) {
+      const rel = dir ? `${dir}/${e.name}` : e.name;
+      const b = document.createElement("button");
+      b.className = "w-full text-left bg-slate-800 active:bg-emerald-600 rounded-lg px-3 py-2.5 text-sm flex items-center gap-2";
+      b.innerHTML = `<span class="shrink-0">${e.dir ? "📁" : IMG_RE.test(e.name) ? "🖼️" : "📄"}</span>` +
+        `<span class="truncate ${e.dir ? "font-semibold" : "font-mono text-[13px]"}">${escapeHtml(e.name)}</span>` +
+        (e.dir ? "" : `<span class="ml-auto text-[10px] text-slate-500 shrink-0">${fmtSize(e.size)}</span>`);
+      b.addEventListener("click", () => (e.dir ? loadDir(rel) : openFile(rel)));
+      filesList.appendChild(b);
+    }
+  } catch (err) {
+    if (seq === filesSeq) filesList.innerHTML = `<p class="text-sm text-red-400 p-2">No se pudo leer la carpeta: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+// Carga CodeMirror y sus complementos del CDN (una sola vez).
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = res;
+    s.onerror = () => rej(new Error(`no se pudo cargar ${src}`));
+    document.head.appendChild(s);
+  });
+}
+function ensureCM() {
+  if (cm) return Promise.resolve();
+  return (cmLoading ||= (async () => {
+    for (const css of ["lib/codemirror.css", "theme/material-darker.css"]) {
+      const l = document.createElement("link");
+      l.rel = "stylesheet";
+      l.href = `${CM_BASE}/${css}`;
+      document.head.appendChild(l);
+    }
+    await loadScript(`${CM_BASE}/lib/codemirror.js`);
+    await Promise.all(["mode/meta.js", "addon/mode/loadmode.js", "addon/search/searchcursor.js", "addon/edit/matchbrackets.js"]
+      .map((f) => loadScript(`${CM_BASE}/${f}`)));
+    CodeMirror.modeURL = `${CM_BASE}/mode/%N/%N.js`;
+    cm = CodeMirror(edHost, {
+      theme: "material-darker",
+      lineNumbers: true,
+      lineWrapping: true,
+      matchBrackets: true,
+      indentUnit: 2,
+      readOnly: "nocursor",
+      extraKeys: { "Ctrl-S": () => saveFile(), "Cmd-S": () => saveFile() },
+    });
+    cm.on("change", updateDirty);
+  })().catch((err) => { cmLoading = null; throw err; }));
+}
+
+function showEdMsg(html) {
+  edHost.classList.toggle("hidden", html != null);
+  edMsg.classList.toggle("hidden", html == null);
+  if (html != null) edMsg.innerHTML = html;
+}
+
+function updateDirty() {
+  const dirty = isDirty();
+  edDirty.classList.toggle("hidden", !dirty);
+  edSave.disabled = !dirty;
+}
+
+function setEditing(on) {
+  if (!cm) return;
+  cm.setOption("readOnly", on ? false : "nocursor"); // "nocursor": no abre el teclado
+  edEditBtn.innerHTML = on ? "&#128065; Ver" : "&#9998; Editar";
+  edEditBtn.classList.toggle("!bg-emerald-700", on);
+  if (on) cm.focus();
+}
+
+async function openFile(rel) {
+  setView("editor");
+  setPathText(edName, rel);
+  edPath = rel;
+  edFile = null;
+  updateDirty();
+  edFind.classList.add("hidden");
+  if (IMG_RE.test(rel)) {
+    showEdMsg(`<img src="${escapeHtml(fileUrl(rel, { raw: 1 }))}" class="max-w-full mx-auto rounded" alt="">`);
+    return;
+  }
+  showEdMsg("Cargando…");
+  try {
+    await ensureCM();
+    const r = await fetch(fileUrl(rel));
+    const data = await r.json();
+    if (edPath !== rel) return; // se abrió otro mientras cargaba
+    if (!r.ok) throw new Error(data.error || r.status);
+    if (data.binary) return showEdMsg(`Archivo binario (${fmtSize(data.size)}): no se puede mostrar.`);
+    if (data.tooBig) return showEdMsg(`Archivo muy grande (${fmtSize(data.size)}) para abrirlo en el celular.`);
+    let text = data.content;
+    const bom = text.startsWith("﻿");
+    if (bom) text = text.slice(1);
+    showEdMsg(null);
+    const info = CodeMirror.findModeByFileName(rel.split("/").pop());
+    cm.setOption("mode", info ? info.mime : null);
+    if (info && info.mode !== "null") CodeMirror.autoLoadMode(cm, info.mode);
+    cm.setValue(text);
+    cm.clearHistory();
+    // Se conservan el fin de línea (CRLF/LF) y el BOM originales al guardar.
+    edFile = { path: rel, mtime: data.mtime, eol: text.includes("\r\n") ? "\r\n" : "\n", bom };
+    edClean = cm.changeGeneration(true);
+    setEditing(false);
+    updateDirty();
+    cm.scrollTo(0, 0);
+    requestAnimationFrame(() => cm.refresh());
+  } catch (err) {
+    showEdMsg(`<span class="text-red-400">No se pudo abrir: ${escapeHtml(err.message)}</span>`);
+  }
+}
+
+async function confirmDiscard() {
+  return !isDirty() || crConfirm({
+    title: "Cambios sin guardar",
+    message: `"${edFile.path}" tiene cambios sin guardar. ¿Descartarlos?`,
+    okText: "Descartar",
+  });
+}
+
+async function closeEditor() {
+  if (!(await confirmDiscard())) return;
+  setEditing(false);
+  edPath = edFile = null;
+  setView("files");
+  loadDir(filesDir); // refresca tamaños
+}
+
+async function saveFile(force = false) {
+  if (!edFile || !cm) return;
+  const file = edFile;
+  edSave.disabled = true;
+  edSave.textContent = "⏳ Guardando…";
+  try {
+    const r = await fetch(fileUrl(file.path, { mtime: file.mtime, ...(force ? { force: 1 } : {}) }), {
+      method: "PUT",
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+      body: (file.bom ? "﻿" : "") + cm.getValue(file.eol),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.status === 409) {
+      edSave.innerHTML = SAVE_LABEL;
+      updateDirty();
+      const ok = await crConfirm({
+        title: "El archivo cambió en la PC",
+        message: "Claude u otro programa lo modificó desde que lo abriste. ¿Sobrescribirlo con tu versión? (Si no, tocá Recargar para ver el actual.)",
+        okText: "Sobrescribir",
+      });
+      if (ok) saveFile(true);
+      return;
+    }
+    if (!r.ok) throw new Error(data.error || r.status);
+    file.mtime = data.mtime;
+    edClean = cm.changeGeneration(true);
+    edSave.textContent = "✓ Guardado";
+  } catch (err) {
+    edSave.textContent = `✗ ${err.message}`.slice(0, 40);
+  }
+  setTimeout(() => { edSave.innerHTML = SAVE_LABEL; updateDirty(); }, 1500);
+}
+
+edSave.addEventListener("click", () => saveFile());
+edEditBtn.addEventListener("click", () => cm && edFile && setEditing(!!cm.getOption("readOnly")));
+document.getElementById("ed-undo").addEventListener("click", () => cm && cm.undo());
+document.getElementById("ed-redo").addEventListener("click", () => cm && cm.redo());
+document.getElementById("ed-tab").addEventListener("click", () => {
+  if (!cm || !edFile || cm.getOption("readOnly")) return;
+  // Respeta el estilo del archivo: tab si ya usa tabs, si no espacios.
+  cm.replaceSelection(/^\t/m.test(cm.getValue()) ? "\t" : " ".repeat(cm.getOption("indentUnit")));
+  cm.focus();
+});
+edWrapBtn.addEventListener("click", () => {
+  if (!cm) return;
+  cm.setOption("lineWrapping", !cm.getOption("lineWrapping"));
+  edWrapBtn.classList.toggle("opacity-50", !cm.getOption("lineWrapping"));
+});
+document.getElementById("ed-reload").addEventListener("click", async () => {
+  if (edPath && (await confirmDiscard())) openFile(edPath);
+});
+// Escribe "@ruta" en el prompt de Claude y vuelve a la terminal.
+document.getElementById("ed-mention").addEventListener("click", async () => {
+  if (!edPath || !(await confirmDiscard())) return;
+  const rel = edPath;
+  setEditing(false);
+  edPath = edFile = null;
+  setView("terminal");
+  send({ type: "input", data: `@${rel} ` });
+  term.focus();
+});
+
+// Búsqueda: resalta la coincidencia siguiente/anterior (con vuelta al inicio).
+function findInFile(dir) {
+  const text = edFindInput.value;
+  if (!cm || !edFile || !text) return;
+  const opts = { caseFold: true };
+  let cur = cm.getSearchCursor(text, cm.getCursor(dir < 0 ? "from" : "to"), opts);
+  if (!(dir < 0 ? cur.findPrevious() : cur.findNext())) {
+    cur = cm.getSearchCursor(text, dir < 0 ? CodeMirror.Pos(cm.lastLine()) : CodeMirror.Pos(cm.firstLine(), 0), opts);
+    if (!(dir < 0 ? cur.findPrevious() : cur.findNext())) {
+      edFindInput.classList.add("ring-2", "ring-red-500");
+      return;
+    }
+  }
+  edFindInput.classList.remove("ring-2", "ring-red-500");
+  if (edHit) edHit.clear();
+  edHit = cm.markText(cur.from(), cur.to(), { className: "cm-hit" });
+  cm.setSelection(cur.from(), cur.to(), { scroll: false });
+  cm.scrollIntoView({ from: cur.from(), to: cur.to() }, 80);
+}
+document.getElementById("ed-find-btn").addEventListener("click", () => {
+  edFind.classList.toggle("hidden");
+  if (!edFind.classList.contains("hidden")) edFindInput.focus();
+  else if (edHit) { edHit.clear(); edHit = null; }
+  if (cm) requestAnimationFrame(() => cm.refresh());
+});
+document.getElementById("ed-find-prev").addEventListener("click", () => findInFile(-1));
+document.getElementById("ed-find-next").addEventListener("click", () => findInFile(1));
+edFindInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); findInFile(e.shiftKey ? -1 : 1); }
 });
 
 // --- Build detectado: ¿descargarlo en el celular? --------------------------

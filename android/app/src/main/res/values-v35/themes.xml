@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 15 fuerza "edge-to-edge" con targetSdk 35: la web quedaba debajo de
+         la barra "Claude Remote" y el teclado la tapaba. Se vuelve al diseño clásico. -->
+    <style name="AppTheme" parent="@android:style/Theme.Material.Light.DarkActionBar">
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
+</resources>

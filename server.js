@@ -8,7 +8,7 @@ import { createReadStream, watch } from "fs";
 import { createInterface } from "readline";
 import { createHash, randomBytes } from "crypto";
 import { homedir, tmpdir } from "os";
-import { join, dirname, resolve, sep, basename, relative } from "path";
+import { join, dirname, resolve, sep, basename, relative, isAbsolute } from "path";
 import { fileURLToPath } from "url";
 import { pushEnabled, addToken, removeToken, sendPush } from "./push.js";
 
@@ -54,6 +54,8 @@ const SESSION_BUFFER_BYTES = Math.max(16_384, parseInt(process.env.SESSION_BUFFE
 const SESSION_IDLE_MS = Math.max(0, parseInt(process.env.SESSION_IDLE_MS || "0", 10));
 // Archivos que se adjuntan desde el celular (imágenes, etc.) para pasárselos a Claude.
 const UPLOAD_DIR = process.env.UPLOAD_DIR || join(tmpdir(), "claude-remote-uploads");
+// Tamaño máximo que se abre en el editor de archivos de la app.
+const EDITOR_MAX_BYTES = Math.max(65_536, parseInt(process.env.EDITOR_MAX_BYTES || "2000000", 10));
 // Extensiones de build que se ofrecen para descargar al celular cuando aparecen
 // (o se reescriben) dentro de la carpeta de una sesión. Vacío = desactivado.
 const BUILD_EXTS = (process.env.BUILD_EXTS ?? ".apk")
@@ -290,6 +292,72 @@ app.post("/api/upload", express.raw({ type: () => true, limit: "50mb" }), async 
     const file = join(UPLOAD_DIR, `${Date.now()}-${name}`);
     await writeFile(file, req.body);
     res.json({ path: file });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Explorador / editor de archivos ---------------------------------------
+// Todo relativo a la carpeta del proyecto (`cwd`, que debe estar permitida);
+// nunca deja salir de ella con "..".
+async function projectPath(cwd, rel = "") {
+  if (!cwd || !(await isAllowed(cwd))) return null;
+  const root = resolve(cwd);
+  const full = resolve(root, String(rel));
+  const r = relative(root, full);
+  if (r.startsWith("..") || isAbsolute(r)) return null; // escapa o es otra unidad
+  return full;
+}
+
+app.get("/api/files", async (req, res) => {
+  const dir = await projectPath(req.query.cwd, req.query.dir);
+  if (!dir) return res.status(403).json({ error: "ruta no permitida" });
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    const out = await Promise.all(entries.map(async (e) => {
+      if (e.isDirectory()) return { name: e.name, dir: true, size: 0 };
+      const st = await stat(join(dir, e.name)).catch(() => null); // sigue symlinks
+      return { name: e.name, dir: !!st?.isDirectory(), size: st?.isFile() ? st.size : 0 };
+    }));
+    out.sort((a, b) => (b.dir - a.dir) || a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true }));
+    res.json({ entries: out });
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+// Texto: {content, mtime, size}; binario o muy grande: {binary|tooBig, size}.
+// `raw=1` sirve el archivo tal cual (vista previa de imágenes).
+app.get("/api/file", async (req, res) => {
+  const file = await projectPath(req.query.cwd, req.query.path);
+  if (!file) return res.status(403).json({ error: "ruta no permitida" });
+  try {
+    const st = await stat(file);
+    if (!st.isFile()) return res.status(400).json({ error: "no es un archivo" });
+    if (req.query.raw) return res.sendFile(file, { dotfiles: "allow" });
+    const info = { size: st.size, mtime: st.mtimeMs };
+    if (st.size > EDITOR_MAX_BYTES) return res.json({ ...info, tooBig: true });
+    const buf = await readFile(file);
+    if (buf.subarray(0, 8000).includes(0)) return res.json({ ...info, binary: true });
+    res.json({ ...info, content: buf.toString("utf8") });
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+// Guarda. Si el archivo cambió desde que se abrió (`mtime` distinto, p. ej. lo
+// editó Claude) responde 409, salvo `force=1`.
+// Cuerpo crudo: se escriben los bytes tal cual (express.text quitaría el BOM).
+app.put("/api/file", express.raw({ type: () => true, limit: "10mb" }), async (req, res) => {
+  const file = await projectPath(req.query.cwd, req.query.path);
+  if (!file) return res.status(403).json({ error: "ruta no permitida" });
+  if (!Buffer.isBuffer(req.body)) return res.status(400).json({ error: "cuerpo inválido" });
+  try {
+    const cur = await stat(file).catch(() => null);
+    if (cur && !req.query.force && req.query.mtime && Math.abs(cur.mtimeMs - Number(req.query.mtime)) > 1)
+      return res.status(409).json({ error: "el archivo cambió en la PC", mtime: cur.mtimeMs });
+    await writeFile(file, req.body);
+    res.json({ mtime: (await stat(file)).mtimeMs });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

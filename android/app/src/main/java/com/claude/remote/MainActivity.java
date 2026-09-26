@@ -20,6 +20,9 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.view.Gravity;
 import android.provider.Settings;
+import android.text.InputType;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputConnection;
 import android.view.Menu;
 import android.view.View;
 import android.view.MenuItem;
@@ -63,11 +66,13 @@ public class MainActivity extends Activity {
     private static final String DL_DONE = "descargas_listas";
     private static final String EXTRA_INSTALL = "installApk";
     private boolean resumed; // la app está en pantalla
+    private AppLock lock;    // bloqueo con huella/PIN del celular
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("cfg", MODE_PRIVATE);
+        lock = new AppLock(this, prefs);
         if (getIntent() != null) pendingPath = getIntent().getStringExtra("path");
         TailnetManager.installCrashHandler(this);
         // Si la última vez se cerró, muestra el porqué. Si fue mientras arrancaba
@@ -77,7 +82,8 @@ public class MainActivity extends Activity {
         String url = prefs.getString("url", null);
         if (url == null || tsCrashed) showConfig();
         else connect();
-        if (report != null) showTextDialog("La app se cerró la última vez", report);
+        // El detalle no se abre solo: queda en ⋮ → "Ver último cierre".
+        if (report != null) Toast.makeText(this, "La app se cerró la última vez (detalle en ⋮)", Toast.LENGTH_SHORT).show();
         installFromExtra(getIntent());
     }
 
@@ -92,12 +98,19 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         resumed = true;
+        lock.onResume(); // pide huella/PIN al abrir o tras 1 min afuera
     }
 
     @Override
     protected void onPause() {
         super.onPause();
         resumed = false;
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        lock.onStop();
     }
 
     @Override
@@ -340,9 +353,27 @@ public class MainActivity extends Activity {
         }
     }
 
+    /**
+     * WebView que pide al teclado el modo "sin sugerencias" (como Termux). Con
+     * sugerencias, Gboard y otros componen la palabra y al tocar un signo (?, !, ,)
+     * la reenvían entera: xterm.js la recibe otra vez y el texto sale duplicado.
+     */
+    static class TerminalWebView extends WebView {
+        TerminalWebView(Context c) { super(c); }
+
+        @Override
+        public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
+            InputConnection ic = super.onCreateInputConnection(outAttrs);
+            outAttrs.inputType = InputType.TYPE_CLASS_TEXT
+                    | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                    | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+            return ic;
+        }
+    }
+
     @SuppressWarnings("SetJavaScriptEnabled")
     private void loadWeb(String url) {
-        web = new WebView(this);
+        web = new TerminalWebView(this);
         setContentView(web);
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
@@ -404,6 +435,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        lock.onActivityResult(requestCode, resultCode);
         if (requestCode != REQ_FILES || fileCallback == null) return;
         Uri[] result = null;
         if (resultCode == RESULT_OK && data != null) {
@@ -446,11 +478,25 @@ public class MainActivity extends Activity {
             menu.add(0, 3, 0, "Tailscale: estado y registro");
             menu.add(0, 4, 0, "Tailscale: cerrar sesión");
         }
+        menu.add(0, 5, 0, lock.enabled() ? "Bloqueo con huella/PIN: activado" : "Bloqueo con huella/PIN: desactivado");
+        menu.add(0, 6, 0, "Ver último cierre");
         return true;
     }
 
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
+        if (lock.isLocked()) return true; // nada del menú sin desbloquear
+        if (item.getItemId() == 5) {
+            lock.setEnabled(!lock.enabled());
+            invalidateOptionsMenu();
+            return true;
+        }
+        if (item.getItemId() == 6) {
+            String r = TailnetManager.lastReport(this);
+            if (r == null) Toast.makeText(this, "No hubo cierres", Toast.LENGTH_SHORT).show();
+            else showTextDialog("Último cierre", r);
+            return true;
+        }
         if (item.getItemId() == 1) {
             showConfig();
             return true;
@@ -477,6 +523,10 @@ public class MainActivity extends Activity {
     public void onBackPressed() {
         // Si la web está dentro de un proyecto, el botón físico vuelve al selector
         // (sin cerrar la app ni cortar la sesión). Si ya está en el selector, sale.
+        if (lock.isLocked()) {
+            moveTaskToBack(true); // bloqueada: atrás solo la manda al fondo
+            return;
+        }
         if (web == null) {
             super.onBackPressed();
             return;

@@ -52,6 +52,7 @@ Copy-Item tray.vbs -Destination ([Environment]::GetFolderPath('Startup')) -Force
 | `APK_PATH` | `claude-remote.apk` (raíz) | Ruta del APK que sirve el autoactualizador |
 | `BUILD_EXTS` | `.apk` | Extensiones (separadas por `;`) que, al generarse en la carpeta de una sesión, se ofrecen para descargar al celular. Vacío = desactivado |
 | `UPLOAD_DIR` | `%TEMP%/claude-remote-uploads` | Dónde se guardan los archivos adjuntados desde el celular |
+| `EDITOR_MAX_BYTES` | `2000000` | Tamaño máximo de archivo que abre el editor de la app |
 | `TAILNET` | (activo) | `0` = no lanzar el Tailscale integrado de la PC |
 | `TAILNET_BIN` | `claude-remote-ts.exe` (raíz) | Binario del Tailscale integrado de la PC |
 | `TAILNET_STATUS` | `127.0.0.1:3099` | Dirección local del estado de ese nodo |
@@ -93,23 +94,25 @@ cd android
 ./gradlew.bat assembleDebug   # Windows (usar ./gradlew en Linux/Mac)
 ```
 
-APK firmado (clave de debug) en `android/app/build/outputs/apk/debug/app-debug.apk`.
+APK firmado (clave de debug) en `android/app/build/outputs/apk/debug/ClaudeRemote-v<versión>.apk`.
 
 ### Instalar y usar
 
-1. Pasá el `.apk` al celu (USB, Telegram, Drive) y abrilo, o `adb install app-debug.apk`.
+1. Pasá el `.apk` al celu (USB, Telegram, Drive) y abrilo, o `adb install ClaudeRemote-v<versión>.apk`.
 2. Permití "Instalar apps de orígenes desconocidos" si Android lo pide.
 3. Abrí **Claude Remote**, ingresá `IP:puerto` (ej. `100.x.y.z:3000`) y tocá **Conectar**.
 4. Elegí un **proyecto** de la lista; Claude arranca dentro de esa carpeta. Botón **‹ Proyectos** para volver a elegir.
-5. Menú **⋮**: *Cambiar servidor* (nueva IP) · *Buscar actualización*.
+5. Menú **⋮**: *Cambiar servidor* (nueva IP) · *Buscar actualización* · *Bloqueo con huella/PIN* (activado por defecto: pide huella, rostro o el PIN del celular al abrir y al volver tras 1 min; oculta la terminal en recientes).
 
 ### Controles en un proyecto
 
 | Control | Qué hace |
 |---------|----------|
+| Teclado | Sin sugerencias ni autocorrector (como Termux): con ellos el teclado reenviaba la palabra al tocar `?` y se duplicaba el texto |
 | Barra de teclas | `Esc`, `⇧Tab` (modo normal/aceptar ediciones/plan), `↑ ↓ ← →`, `⏎`, `Tab`, `^C` |
 | **⌨ Más** | Todos los atajos del CLI: Esc Esc, nueva línea, Ctrl+O/T/B/R/L, Alt+P/T, edición de línea, RePág/AvPág, `!`, `@`, `/` |
 | **/ Comandos** | Buscador con los comandos del CLI + los propios y skills (proyecto y usuario). Los que llevan argumento se escriben sin Enter |
+| **📁 Archivos** | Explorador de la carpeta del proyecto. Los archivos se abren en un editor con resaltado de sintaxis (CodeMirror), en modo lectura para no abrir el teclado: **✏ Editar** habilita la escritura; **💾 Guardar** los escribe en la PC (conserva CRLF/BOM y avisa si Claude lo modificó mientras tanto). Además: buscar, deshacer/rehacer, Tab, ajuste de línea, recargar, vista previa de imágenes y **@ Claude** (menciona el archivo en el prompt). Atrás: editor → archivos → terminal |
 | **📎 Adjuntar** | Sube fotos/archivos a la PC y escribe su ruta en el prompt para que Claude los lea |
 | **📋 Copiar / 📥 Pegar / 🔗 Links / 📊 Uso** | Portapapeles, URLs de la pantalla y uso del plan |
 
@@ -123,7 +126,7 @@ La app trae Tailscale adentro ([tsnet](https://tailscale.com/docs/features/tsnet
 2. La primera vez tocá **Iniciar sesión en Tailscale** y entrá con la misma cuenta que la PC (o pegá una clave `tskey-auth-…` en la configuración). El celular aparece como `claude-remote-<modelo>` en tu tailnet.
 3. Queda recordado. Si todo anda, ya podés desinstalar la app de Tailscale.
 
-Menú **⋮**: *Tailscale: estado y registro* (diagnóstico, se puede copiar) · *cerrar sesión*. Si la app se cierra, al reabrirla muestra el motivo (botón **Copiar**) y, si fue al arrancar Tailscale, abre la configuración en vez de reintentar. Recomendado: en la consola de Tailscale, **desactivar el vencimiento de clave** de ese dispositivo (si no, pide login de nuevo cada ~180 días).
+Menú **⋮**: *Tailscale: estado y registro* (diagnóstico, se puede copiar) · *cerrar sesión*. Si la app se cierra, al reabrirla avisa y guarda el motivo en ⋮ → *Ver último cierre* (botón **Copiar**) y, si fue al arrancar Tailscale, abre la configuración en vez de reintentar. Recomendado: en la consola de Tailscale, **desactivar el vencimiento de clave** de ese dispositivo (si no, pide login de nuevo cada ~180 días).
 
 ### Autoactualización
 
